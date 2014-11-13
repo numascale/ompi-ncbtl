@@ -332,35 +332,31 @@ static void processlist()
 //	rbuf->size, rbuf->seqno, rhdr->peer);
 //fflush(stderr);
 
-if( type == MSG_TYPE_BLK0 ) {
-	assert( rbuf->size == 0 );
-	assert( rbuf->seqno == 0 );
-	assert( rbuf->buf == 0 );
-}
-else {
-	assert( rbuf->size > 0 );
-	assert( rbuf->seqno > 0 );
-	assert( rbuf->buf );
-}
-
 		if( type == MSG_TYPE_BLK0 ) {
+	        mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)src;
+
+			rbuf->msgsize = hdr->msg_size;
+
 			rbuf->size = 0;
-			rbuf->buf = malloc(MAX_MSG_SIZE + MPI_HDR_SIZE);
+			if( !rbuf->buf ) {
+				rbuf->buf = malloc(MAX_MSG_SIZE + MPI_HDR_SIZE);
+			}
+//__sync_add_and_fetch(&mca_btl_nc_component.sysctxt->mem, (uint64_t)hdr->msg_size);
 		}
 
-		assert( rbuf->size + size <= MAX_MSG_SIZE + MPI_HDR_SIZE );
+//		assert( rbuf->size + size <= MAX_MSG_SIZE + MPI_HDR_SIZE );
+		assert( rbuf->size + size <= hdr->msg_size );
 		memcpy(rbuf->buf + rbuf->size, src, size);
 
 		rbuf->size += size;
-		++rbuf->seqno;
 
 		if( type == MSG_TYPE_BLKN ) {
 			processmsg(frag, MSG_TYPE_FRAG, rbuf->buf, rbuf->size);
 
 			rbuf->size = 0;	
-			rbuf->seqno = 0;
-			rbuf->buf = 0;
-			free(rbuf->buf);
+			rbuf->msgsize = 0;
+			//free(rbuf->buf);
+//__sync_add_and_fetch(&mca_btl_nc_component.sysctxt->mem, -(uint64_t)hdr->msg_size);
 		}
 	}
 
@@ -375,6 +371,34 @@ static uint64_t __t0 = 0;
 
 int mca_btl_nc_component_progress(void)
 {
+//uint32_t id;
+//uint64_t t1;
+//if( __t0 == 0 ) {
+//	__t0 = rdtscp(&id);
+//}
+//t1 = rdtscp(&id);
+//if( t1 >= __t0 ) {
+//	double dt = (double)(t1 - __t0) / 2.6e9;
+//	if( (dt > 2.0) && (MY_RANK == 0) ) {
+//		node_t* node = mca_btl_nc_component.node;
+//
+//		uint64_t mem = mca_btl_nc_component.sysctxt->mem;
+//		uint64_t fragmem = mca_btl_nc_component.sysctxt->fragmem;
+//		uint64_t fragcnt = mca_btl_nc_component.sysctxt->fragcnt;
+//		uint64_t ringmem = mca_btl_nc_component.sysctxt->ringmem;
+//
+//		fprintf(stderr, "%d mem %d MB,    fragmem %d MB, cnt %d,   ringmem %d\n", 
+//			MY_RANK, (int)(mem >> 20), (int)(fragmem >> 20), fragcnt, (int)(ringmem >> 20));
+//		fflush(stderr);
+//		__t0 = rdtscp(&id);
+//	}
+//}
+//else {
+//	__t0 = rdtscp(&id);
+//}
+
+
+
 	uint64_t ofs = mca_btl_nc_component.shm_ofs;
 	volatile fifolist_t* list = mca_btl_nc_component.myinq;
 
@@ -418,8 +442,6 @@ int mca_btl_nc_component_progress(void)
 				assert( z1 <= 3 ); // do 3 intermediate ring resets
 				if( (z1 > z0) && __sync_bool_compare_and_swap(&ring->ttail, z0, z1) ) {
 					// reset remote tail
-//fprintf(stderr, "%d RST POS %d->%d, rtail %d, __rst %d %d\n", MY_RANK, z0, z1, rtail, ++__rst, __rst2);
-//fflush(stderr);
 					uint32_t* ptail = ring->ptail + (uint64_t)mca_btl_nc_component.sysctxt;
 					nccopy4(ptail, rtail);
 				}
@@ -435,11 +457,6 @@ int mca_btl_nc_component_progress(void)
 				assert( rsize >= 16 );
 
 				bool local = (rhdr->dst_ndx == mca_btl_nc_component.cpuindex);
-//if( !local )
-//	break;
-
-//fprintf(stderr, "%d RECV, rtail %d, rsize %d, dst %d, type 0x%x\n", MY_RANK, rtail, rsize, rhdr->dst_ndx, type);
-//fflush(stderr);
 
 				frag_t* frag = 0;
 
@@ -460,6 +477,7 @@ int mca_btl_nc_component_progress(void)
 				}
 
 				int n = (rsize >> 3);
+
 				volatile uint64_t* p = (uint64_t*)rhdr;
 				assert( ((uint64_t)p & 0x7) == 0 );
 

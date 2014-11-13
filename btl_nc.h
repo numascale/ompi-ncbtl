@@ -61,7 +61,7 @@ BEGIN_C_DECLS
 #define MAX_PROCS_PER_NODE 32
 
 #define MAX_EAGER_SIZE (4 * 1024)
-#define MAX_SEND_SIZE  (16 * 1024)
+#define MAX_SEND_SIZE  (8 * 1024)
 #define MAX_MSG_SIZE   (1024 * 1024)
 
 #define MAX_SIZE_FRAGS (1024 * 1024 * 1024)
@@ -77,8 +77,8 @@ BEGIN_C_DECLS
 #define SFRAG_SIZE (FRAG_SIZE + RHDR_SIZE + syncsize(MAX_EAGER_SIZE) + MAX_EAGER_SIZE)
 #define BFRAG_SIZE (FRAG_SIZE + RHDR_SIZE + syncsize(MAX_SEND_SIZE) + MAX_SEND_SIZE)
 
-#define RING_SIZE (256 * 1024)
-#define RING_SIZE_LOG2 (18)
+#define RING_SIZE (64 * 1024)
+#define RING_SIZE_LOG2 (16)
 
 #define SEMLOCK_UNLOCKED 0
 #define SEMLOCK_LOCKED 1
@@ -173,7 +173,7 @@ typedef struct {
 
 typedef struct {
 	int32_t size;
-	int32_t seqno;
+	int32_t msgsize;
 	void*   buf;
 } recvbuf_t;
 
@@ -205,13 +205,13 @@ struct fifolist; // forward declaration
 typedef struct frag {
 	struct frag* next;
 	int32_t      hdr_size;  // sizeof(mca_btl_nc_hdr_t) + reserved
+	int32_t      numanode;	// target numanode
 	int32_t      size;		// message body size including mpi headers
 	int32_t      rsize;     // total size in ring
 	int32_t      sbit;      // synchronization bit
 	bool         small;     // fragment small/large flag
 	bool         inuse;     // fragment is in use
 	int32_t      ringndx;   // index of ring message was received in
-	int32_t      pad; 
 	void*        data;		// pointer to mpi data appended after frag and ring header
 } frag_t;
 
@@ -231,6 +231,8 @@ struct mca_btl_nc_hdr_t {
     mca_btl_nc_segment_t            segment;
     struct mca_btl_base_endpoint_t* endpoint;
     mca_btl_base_tag_t              tag;
+int32_t      hdr_size;  
+int32_t      msg_size;  
 	int32_t				            src_rank;
 	frag_t*   					    frag;
 	struct mca_btl_nc_hdr_t*        self;
@@ -278,6 +280,7 @@ typedef struct {
 
 typedef struct {
 	volatile bool active;
+	bool          yieldcpu;
 	void*         shm_base;
 	int32_t       ring_cnt;
 	volatile int32_t commit_ring ALIGN8;
@@ -291,6 +294,13 @@ typedef struct {
 	int      max_nodes;
 	int      node_count;
 	int      rank_count;
+uint64_t mem;
+
+uint64_t fragmem;
+uint32_t fragcnt;
+
+uint64_t ringmem;
+
 	uint32_t map[MAX_PROCS];
 	uint32_t cpuid[MAX_PROCS];
 } sysctxt_t;
