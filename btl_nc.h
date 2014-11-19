@@ -47,22 +47,21 @@ BEGIN_C_DECLS
 
 #define MSG_TYPE_ISEND 0x02
 #define MSG_TYPE_FRAG  0x04
-#define MSG_TYPE_ACK   0x08
-#define MSG_TYPE_BLK0  0x10
-#define MSG_TYPE_BLK   0x20
-#define MSG_TYPE_BLKN  0x40
-#define MSG_TYPE_RST   0x80
+#define MSG_TYPE_ACK   0x06
+
+#define MSG_TYPE_BLK   0x08
+#define MSG_TYPE_BLKN  0x18
+#define MSG_TYPE_RST   0x20
 
 
 #define NC_CLSIZE (64)    // cache line size
 
-#define MAX_NODES 1024
-#define MAX_PROCS 4096
+#define MAX_PROCS 16384
 #define MAX_PROCS_PER_NODE 32
 
 #define MAX_EAGER_SIZE (4 * 1024)
-#define MAX_SEND_SIZE  (8 * 1024)
-#define MAX_MSG_SIZE   (1024 * 1024)
+#define MAX_SEND_SIZE  (16 * 1024)
+#define MAX_MSG_SIZE   (16 * 1024 * 1024)
 
 #define MAX_SIZE_FRAGS (1024 * 1024 * 1024)
 
@@ -88,13 +87,6 @@ BEGIN_C_DECLS
 #define forceinline inline __attribute__((always_inline))
 
 
-
-static void forceinline lfence()
-{
-	__asm__ __volatile__ ("lfence\n");
-}
-
-
 static void forceinline __semlock(volatile int32_t* v)
 {
 	__asm__ __volatile__ (
@@ -114,7 +106,7 @@ static bool forceinline __semtrylock(volatile int32_t* v)
 		"movl $1, %%ebx\n"
 		"xorl %%eax, %%eax\n"
         "lock cmpxchgl %%ebx, %0\n"
-		"notl %%eax\n"
+		"xorl $1, %%eax\n"
 		"movl %%eax, %1\n"
         : "+m" (*v), "=r"(rc) : : "eax", "ebx", "memory");
 	return rc;
@@ -129,41 +121,43 @@ static void forceinline __semunlock(volatile int32_t* v)
 }
 
 
-static inline void semlock(volatile uint32_t* v)
-{
-    while( !__sync_bool_compare_and_swap(v, SEMLOCK_UNLOCKED, SEMLOCK_LOCKED) );
-}
-
-static inline void semunlock(volatile uint32_t* v)
-{
-    __sync_bool_compare_and_swap(v, SEMLOCK_LOCKED, SEMLOCK_UNLOCKED);
-}
-
-static inline int semtrylock(volatile uint32_t* v)
-{
-    return __sync_bool_compare_and_swap(v, SEMLOCK_UNLOCKED, SEMLOCK_LOCKED);
-}
-
 static inline int32_t lockedAdd(volatile int32_t* v, int val)
 {
 	return (int32_t)__sync_add_and_fetch(v, val);
 }
 
 
-static inline void sfence() {
+static void forceinline __lfence() {
+    __asm__ __volatile__ ("lfence\n");
+}
+
+
+static void forceinline __sfence() {
     __asm__ __volatile__ ("sfence\n");
 }
 
-static inline void mfence() {
+
+static void forceinline __mfence() {
     __asm__ __volatile__ ("mfence\n");
 }
+
+
+static void forceinline __nccopy4(void* to, const uint32_t head)
+{
+    __asm__ __volatile__ (
+		"movl %0, %%eax\n"
+		"movnti %%eax, (%1)\n"
+		"sfence\n"
+        :: "r" (head), "r" (to) : "eax", "memory");
+}
+
 
 /*
  * ring header
  */
 typedef struct {
-	uint32_t type    : 8;  // sync bit and message type
-	uint32_t dst_ndx : 4;  // destination cpu index relative to numa node
+	uint32_t type    : 6;  // sync bit and message type
+	uint32_t dst_ndx : 6;  // destination cpu index in group sharing ring
 	uint32_t rsize   : 16; // size in ring
 	uint32_t pad8    : 3;  // padding bytes used for 8 bytes alignment
 	uint32_t unused  : 1;
@@ -173,7 +167,6 @@ typedef struct {
 
 typedef struct {
 	int32_t size;
-	int32_t msgsize;
 	void*   buf;
 } recvbuf_t;
 
@@ -204,7 +197,7 @@ struct fifolist; // forward declaration
  */
 typedef struct frag {
 	struct frag* next;
-	int32_t      hdr_size;  // sizeof(mca_btl_nc_hdr_t) + reserved
+	int32_t		 nseq;		// nseq frags in this sequence (nseq - 1 following next)
 	int32_t      numanode;	// target numanode
 	int32_t      size;		// message body size including mpi headers
 	int32_t      rsize;     // total size in ring
@@ -231,11 +224,9 @@ struct mca_btl_nc_hdr_t {
     mca_btl_nc_segment_t            segment;
     struct mca_btl_base_endpoint_t* endpoint;
     mca_btl_base_tag_t              tag;
-int32_t      hdr_size;  
-int32_t      msg_size;  
+	int32_t							reserve;  
 	int32_t				            src_rank;
-	frag_t*   					    frag;
-	struct mca_btl_nc_hdr_t*        self;
+	frag_t*							self;
 };
 typedef struct mca_btl_nc_hdr_t mca_btl_nc_hdr_t;
 
@@ -294,13 +285,6 @@ typedef struct {
 	int      max_nodes;
 	int      node_count;
 	int      rank_count;
-uint64_t mem;
-
-uint64_t fragmem;
-uint32_t fragcnt;
-
-uint64_t ringmem;
-
 	uint32_t map[MAX_PROCS];
 	uint32_t cpuid[MAX_PROCS];
 } sysctxt_t;
@@ -346,7 +330,7 @@ struct mca_btl_nc_component_t {
 	void**     peer_ring_buf;
 
 	frag_t*    frag0;
-	recvbuf_t  recvbuf[MAX_NODES];
+	recvbuf_t* recvbuf;
 
     int32_t    num_smp_procs;		// current number of smp procs on this host
     int32_t    my_smp_rank;			// My SMP process rank.  Used for accessing

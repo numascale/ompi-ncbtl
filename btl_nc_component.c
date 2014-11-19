@@ -57,39 +57,25 @@
 
 #include "btl_nc.h"
  
-static void mov8(void* to, const void* from);
-
-int getnode(void* ptr);
-
-
  
-static uint64_t inline rdtscp(uint32_t* id) 
-{
-    uint32_t lo, hi, aux;
-	__asm__ __volatile__ (".byte 0x0f,0x01,0xf9" : "=a" (lo), "=d" (hi), "=c" (aux));
-	*id = aux;
-    return (uint64_t)hi << 32 | lo;
-}
-
-
 static void fifo_push_back(fifolist_t* list, frag_t* frag);
-void sendack(int peer, void* hdr);
-frag_t* allocfrag(int size);
-void freefrag(frag_t* frag);
-
 static int mca_btl_nc_component_open(void);
 static int mca_btl_nc_component_close(void);
 static int nc_register(void);
-static void processmsg(frag_t* frag, int type, const void* src, int size);
+static void processmsg(int type, const void* src, int size);
 static void sbitreset(const void* sbits, void* src, int size8, int sbit);
 static void memcpy8(void* to, const void* from, int n);
 static void memset8(void* to, uint64_t val, int n);
-static void nccopy4(void* to, const uint32_t head);
+static void	copymsg(void* to, void* from, int sbit, int size);
 static mca_btl_base_module_t** mca_btl_nc_component_init(
     int *num_btls,
     bool enable_progress_threads,
     bool enable_mpi_threads
 );
+
+void sendack(int peer, void* hdr);
+frag_t* allocfrag(int size);
+void freefrag(frag_t* frag);
 
 
 /*
@@ -171,7 +157,7 @@ static int mca_btl_nc_component_close(void)
 	if( (uint64_t)mca_btl_nc_component.sendthread ) {
 
 		mca_btl_nc_component.node->active = 0;
-		sfence();
+		__sfence();
 
 		pthread_join(mca_btl_nc_component.sendthread, 0);
 	}
@@ -218,15 +204,6 @@ mca_btl_base_module_t** mca_btl_nc_component_init(
 }
 
 
-static int currCPU()
-{
-	uint32_t cpuid; 
-	rdtscp(&cpuid);
-	cpuid &= 0xfff; 
-	return cpuid;
-}
-
-
 static void fifo_push_back(fifolist_t* list, frag_t* frag)
 {
 	frag->next = 0;
@@ -255,7 +232,6 @@ static void	decodemsg(frag_t* frag)
 	rhdr_t* rhdr = (rhdr_t*)(frag + 1);
 
 	int size8 = (rhdr->rsize << 2) - sizeof(rhdr_t);
-
 	if( size8 > SHDR ) {
 		size8 -= isyncsize(size8);
 	}
@@ -279,16 +255,6 @@ static void	decodemsg(frag_t* frag)
 	rhdr->type &= ~1;
 	frag->size = size8 - rhdr->pad8;
 	frag->data = src;
-}
-
-
-static void nccopy8(void* to, const void* from)
-{
-    __asm__ __volatile__ (
-		"movq (%0), %%rax\n"
-        "movnti %%rax, (%1)\n"
-		"sfence\n"
-        :: "r" (from), "r" (to) : "rax", "memory");
 }
 
 
@@ -319,44 +285,24 @@ static void processlist()
 	int size = frag->size;
 	int type = rhdr->type;
 
-	// all bat last chunk of a split message is type MSG_TYPE_CONT
-	// last chunk of a split message is type MSG_TYPE_FRAG
-
 	if( type & (MSG_TYPE_ISEND | MSG_TYPE_FRAG | MSG_TYPE_ACK) ) {
-		processmsg(frag, type, src, size);
+		processmsg(type, src, size);
 	}
 	else {
+		assert( frag->ringndx < mca_btl_nc_component.sysctxt->max_nodes );
 		recvbuf_t* rbuf = &mca_btl_nc_component.recvbuf[frag->ringndx];
 
-//fprintf(stderr, "%d ****RECV type 0x%x, size %d, rbuf->size %d, rbuf->seqno %d, peer %d\n", MY_RANK, type, size,
-//	rbuf->size, rbuf->seqno, rhdr->peer);
-//fflush(stderr);
-
-		if( type == MSG_TYPE_BLK0 ) {
-	        mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)src;
-
-			rbuf->msgsize = hdr->msg_size;
-
-			rbuf->size = 0;
-			if( !rbuf->buf ) {
-				rbuf->buf = malloc(MAX_MSG_SIZE + MPI_HDR_SIZE);
-			}
-//__sync_add_and_fetch(&mca_btl_nc_component.sysctxt->mem, (uint64_t)hdr->msg_size);
+		if( !rbuf->buf ) {
+			rbuf->buf = malloc(MAX_MSG_SIZE + MPI_HDR_SIZE);
 		}
-
-//		assert( rbuf->size + size <= MAX_MSG_SIZE + MPI_HDR_SIZE );
-		assert( rbuf->size + size <= hdr->msg_size );
-		memcpy(rbuf->buf + rbuf->size, src, size);
+		assert( rbuf->size + size <= MAX_MSG_SIZE + MPI_HDR_SIZE );
+		memcpy8(rbuf->buf + rbuf->size, src, size);
 
 		rbuf->size += size;
 
 		if( type == MSG_TYPE_BLKN ) {
-			processmsg(frag, MSG_TYPE_FRAG, rbuf->buf, rbuf->size);
-
+			processmsg(MSG_TYPE_FRAG, rbuf->buf, rbuf->size);
 			rbuf->size = 0;	
-			rbuf->msgsize = 0;
-			//free(rbuf->buf);
-//__sync_add_and_fetch(&mca_btl_nc_component.sysctxt->mem, -(uint64_t)hdr->msg_size);
 		}
 	}
 
@@ -366,39 +312,8 @@ static void processlist()
 }
 
 
-static uint64_t __t0 = 0;
-
-
 int mca_btl_nc_component_progress(void)
 {
-//uint32_t id;
-//uint64_t t1;
-//if( __t0 == 0 ) {
-//	__t0 = rdtscp(&id);
-//}
-//t1 = rdtscp(&id);
-//if( t1 >= __t0 ) {
-//	double dt = (double)(t1 - __t0) / 2.6e9;
-//	if( (dt > 2.0) && (MY_RANK == 0) ) {
-//		node_t* node = mca_btl_nc_component.node;
-//
-//		uint64_t mem = mca_btl_nc_component.sysctxt->mem;
-//		uint64_t fragmem = mca_btl_nc_component.sysctxt->fragmem;
-//		uint64_t fragcnt = mca_btl_nc_component.sysctxt->fragcnt;
-//		uint64_t ringmem = mca_btl_nc_component.sysctxt->ringmem;
-//
-//		fprintf(stderr, "%d mem %d MB,    fragmem %d MB, cnt %d,   ringmem %d\n", 
-//			MY_RANK, (int)(mem >> 20), (int)(fragmem >> 20), fragcnt, (int)(ringmem >> 20));
-//		fflush(stderr);
-//		__t0 = rdtscp(&id);
-//	}
-//}
-//else {
-//	__t0 = rdtscp(&id);
-//}
-
-
-
 	uint64_t ofs = mca_btl_nc_component.shm_ofs;
 	volatile fifolist_t* list = mca_btl_nc_component.myinq;
 
@@ -416,7 +331,7 @@ int mca_btl_nc_component_progress(void)
 		ring_t* ringnext = (ring_t*)(ring + 1);
 		__builtin_prefetch((void*)ringnext);
 
-		if( !semtrylock(&ring->lock) ) {
+		if( !__semtrylock(&ring->lock) ) {
 
 			if( list->head ) {
 				processlist();
@@ -435,7 +350,6 @@ int mca_btl_nc_component_progress(void)
 			int type = rhdr->type;
 
 			if( (type & 1) != sbit ) {
-
 				// no message
 				int32_t z0 = ring->ttail;
 				int32_t z1 = (rtail >> (RING_SIZE_LOG2 - 2));
@@ -443,7 +357,7 @@ int mca_btl_nc_component_progress(void)
 				if( (z1 > z0) && __sync_bool_compare_and_swap(&ring->ttail, z0, z1) ) {
 					// reset remote tail
 					uint32_t* ptail = ring->ptail + (uint64_t)mca_btl_nc_component.sysctxt;
-					nccopy4(ptail, rtail);
+					__nccopy4(ptail, rtail);
 				}
 				break;
 			}
@@ -476,25 +390,7 @@ int mca_btl_nc_component_progress(void)
 					return 0;
 				}
 
-				int n = (rsize >> 3);
-
-				volatile uint64_t* p = (uint64_t*)rhdr;
-				assert( ((uint64_t)p & 0x7) == 0 );
-
-				uint64_t* q = (uint64_t*)(frag + 1);
-				assert( ((uint64_t)q & 0x7) == 0 );
-
-				// handle out-of-order receives
-				lfence();
-				while( n ) {
-					if( ((*p) & 1) == sbit ) {
-						*q++ = *p++;
-						--n;
-					}		
-					else {
-						lfence();
-					}
-				}
+				copymsg(frag + 1, rhdr, sbit, rsize);
 
 				frag->sbit = sbit;
 				frag->ringndx = ringndx;
@@ -508,8 +404,8 @@ int mca_btl_nc_component_progress(void)
 				}
 
 				rtail += rsize;		
-				
-				if( !local || (local && (type == MSG_TYPE_ISEND)) ) {
+
+				if( (!local && list->head) || (local && ((type == MSG_TYPE_ISEND) || (type == MSG_TYPE_FRAG) || (type == MSG_TYPE_BLKN))) ) {
 					break;
 				}
 
@@ -523,7 +419,7 @@ int mca_btl_nc_component_progress(void)
 					memset8((uint8_t*)rhdr, sbit, n);
 				}
 				uint32_t* ptail = ring->ptail + (uint64_t)mca_btl_nc_component.sysctxt;
-				nccopy4(ptail, 0);
+				__nccopy4(ptail, 0);
 
 				rtail = 0;
 				rhdr = (rhdr_t*)(ring->buf + ofs);
@@ -534,7 +430,7 @@ int mca_btl_nc_component_progress(void)
 		}
 
 		ring->tail = rtail;
-		semunlock(&ring->lock);
+		__semunlock(&ring->lock);
 
 		if( list->head ) {
 			break;
@@ -551,7 +447,7 @@ int mca_btl_nc_component_progress(void)
 }
 
 
-static void processmsg(frag_t* frag, int type, const void* src, int size)
+static void processmsg(int type, const void* src, int size)
 {
 	if( type == MSG_TYPE_ISEND ) {
 		struct {
@@ -574,8 +470,6 @@ static void processmsg(frag_t* frag, int type, const void* src, int size)
 	if( type == MSG_TYPE_FRAG ) {
 
         mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)src;
-//fprintf(stderr, "%d MSG_TYPE_FRAG, size %d %d\n", MY_RANK, (int)hdr->segment.base.seg_len, size);
-//fflush(stderr);
 
         mca_btl_nc_hdr_t msg;
 
@@ -597,13 +491,14 @@ static void processmsg(frag_t* frag, int type, const void* src, int size)
 	else {
 		assert( type == MSG_TYPE_ACK );
 
-		mca_btl_nc_hdr_t* hdr = *(mca_btl_nc_hdr_t**)src;
+		frag_t* frag = *(frag_t**)src;
+		mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(frag + 1);
 
         assert( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags );
 
         hdr->base.des_cbfunc(&mca_btl_nc.super, hdr->endpoint, &hdr->base, OMPI_SUCCESS);
 		
-		free(hdr);
+		freefrag(frag);
 	}
 }
 
@@ -676,50 +571,95 @@ static void sbitreset(const void* sbits, void* src, int size8, int sbit)
 }
 
 
-void memcpy8(void* to, const void* from, int n)
+static void memcpy8(void* to, const void* from, int n)
 {
     assert( n > 0 );
 	assert( (n & 0x7) == 0 );
 	assert( (((uint64_t)from) & 0x7) == 0 );
 	assert( (((uint64_t)to) & 0x7) == 0 );
 
-	n >>= 3;
-
-	for( size_t i = 0; i < n; i++ ) {
-		__asm__ __volatile__ (
-			"movq (%0), %%rax\n"
-			"movq %%rax, (%1)\n"
-		    : : "r" (from), "r" (to) : "rax", "memory");
-		from += 8;
-		to += 8;
-	}
+	__asm__ __volatile__ (
+		"movl %0, %%ecx\n"
+		"shr  $3, %%ecx\n"
+		"movq %1, %%rsi\n"
+		"movq %2, %%rdi\n"
+		"1:\n"
+		"movq (%%rsi), %%rax\n"
+		"movq %%rax, (%%rdi)\n"
+		"addq $8, %%rsi\n" 
+		"addq $8, %%rdi\n" 
+		"loop 1b\n"
+	    : : "r" (n), "r" (from), "r" (to) : "ecx", "rax", "rsi", "rdi", "memory");
 }
 
 
-void memset8(void* to, uint64_t val, int n)
+static void memset8(void* to, uint64_t val, int n)
 {
     assert( n > 0 );
 	assert( (n & 0x7) == 0 );
 	assert( (((uint64_t)to) & 0x7) == 0 );
 
-	n >>= 3;
-
-	for( size_t i = 0; i < n; i++ ) {
-		__asm__ __volatile__ (
-			"movq %0, %%rax\n"
-			"movq %%rax, (%1)\n"
-		    : : "r" (val), "r" (to) : "rax", "memory");
-		to += 8;
-	}
+	__asm__ __volatile__ (
+		"movl %0, %%ecx\n"
+		"shr  $3, %%ecx\n"
+		"movq %1, %%rax\n"
+		"movq %2, %%rdi\n"
+		"1:\n"
+		"movq %%rax, (%%rdi)\n"
+		"addq $8, %%rdi\n" 
+		"loop 1b\n"
+	    : : "r" (n), "r" (val), "r" (to) : "ecx", "rax", "rdi", "memory");
 }
 
 
-static void nccopy4(void* to, const uint32_t head)
+static void	copymsg(void* to, void* from, int sbit, int size)
 {
-    __asm__ __volatile__ (
-		"movl %0, %%eax\n"
-		"movnti %%eax, (%1)\n"
-		"sfence\n"
-        :: "r" (head), "r" (to) : "eax", "memory");
+	//int n = (rsize >> 3);
+
+	//volatile uint64_t* p = (uint64_t*)from;
+	//assert( ((uint64_t)p & 0x7) == 0 );
+
+	//uint64_t* q = (uint64_t*)to;
+	//assert( ((uint64_t)q & 0x7) == 0 );
+
+	//// handle out-of-order receives
+	//__lfence();
+	//while( n ) {
+	//	if( ((*p) & 1) == sbit ) {
+	//		*q++ = *p++;
+	//		--n;
+	//	}		
+	//	else {
+	//		__lfence();
+	//	}
+	//}
+
+
+	__asm__ __volatile__ (
+		"lfence\n"
+		"movl %0, %%ecx\n"
+		"shr  $3, %%ecx\n"
+		"movl %1, %%ebx\n"
+		"movq %2, %%rsi\n"
+		"movq %3, %%rdi\n"
+		"1:\n"
+		"movq (%%rsi), %%rax\n"
+		"movq %%rax, %%rdx\n"
+		"andq $1, %%rdx\n"
+		"cmpq %%rdx, %%rbx\n"
+		"jnz 2f\n"
+		"movq %%rax, (%%rdi)\n"
+		"addq $8, %%rsi\n" 
+		"addq $8, %%rdi\n" 
+		"loop 1b\n"
+		"jmp  3f\n"
+		"2:\n"
+		"lfence\n"
+		"jmp 1b\n"
+		"3:\n"
+	    : : "r" (size), "r" (sbit), "r" (from), "r" (to) : "ecx", "rax", "rbx", "rdx", "rsi", "rdi", "memory");
 }
+
+
+
 
