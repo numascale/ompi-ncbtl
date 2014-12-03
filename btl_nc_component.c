@@ -63,10 +63,10 @@ static int mca_btl_nc_component_open(void);
 static int mca_btl_nc_component_close(void);
 static int nc_register(void);
 static void processmsg(int type, const void* src, int size);
-static void sbitreset(const void* sbits, void* src, int size8, int sbit);
+static void sbitreset(void* dst, const void* sbits, const void* src, int size8, int sbit);
 static void memcpy8(void* to, const void* from, int n);
 static void memset8(void* to, uint64_t val, int n);
-static void	copymsg(void* to, void* from, int sbit, int size);
+static void	copymsg(void* to, void* from, int sbit, int size8);
 static mca_btl_base_module_t** mca_btl_nc_component_init(
     int *num_btls,
     bool enable_progress_threads,
@@ -227,47 +227,15 @@ static void fifo_push_back(fifolist_t* list, frag_t* frag)
 }
 
 
-static void	decodemsg(frag_t* frag)
-{
-	rhdr_t* rhdr = (rhdr_t*)(frag + 1);
-
-	int size8 = (rhdr->rsize << 2) - sizeof(rhdr_t);
-	if( size8 > SHDR ) {
-		size8 -= isyncsize(size8);
-	}
-
-	assert( size8 >= 8 );
-
-	void* sbits;
-	void* src = (uint8_t*)(rhdr + 1);
-	assert( ((uint64_t)src & 0x7) == 0 );
-
-	if( size8 <= SHDR ) {
-		sbits = &rhdr->sbits;
-	}
-	else {
-		sbits = src;
-		src += syncsize(size8);
-	}
-
-	sbitreset(sbits, src, size8, frag->sbit);
-
-	rhdr->type &= ~1;
-	frag->size = size8 - rhdr->pad8;
-	frag->data = src;
-}
-
-
 static void processlist()
 {
 	fifolist_t* list = mca_btl_nc_component.myinq;
-	uint64_t ofs = mca_btl_nc_component.shm_ofs;
 
 	assert( list->head );
 
 	// transfer fragment from local nodes to peers address space
 	frag_t* frag = list->head;
-	frag = (frag_t*)((void*)frag + ofs);
+	frag = (frag_t*)((void*)frag + mca_btl_nc_component.shm_ofs);
 
 	if( frag->next ) {
 		list->head = frag->next;
@@ -278,43 +246,18 @@ static void processlist()
 		__semunlock(&list->lock);
 	}
 
-	decodemsg(frag);
-
-	rhdr_t* rhdr = (rhdr_t*)(frag + 1);
-	void* src = frag->data;
+	void* src = frag + 1;
 	int size = frag->size;
-	int type = rhdr->type;
+	int type = frag->msgtype;
 
-	if( type & (MSG_TYPE_ISEND | MSG_TYPE_FRAG | MSG_TYPE_ACK) ) {
-		processmsg(type, src, size);
-	}
-	else {
-		assert( frag->ringndx < mca_btl_nc_component.sysctxt->max_nodes );
-		recvbuf_t* rbuf = &mca_btl_nc_component.recvbuf[frag->ringndx];
+	processmsg(type, src, size);
 
-		if( !rbuf->buf ) {
-			rbuf->buf = malloc(MAX_MSG_SIZE + MPI_HDR_SIZE);
-		}
-		assert( rbuf->size + size <= MAX_MSG_SIZE + MPI_HDR_SIZE );
-		memcpy8(rbuf->buf + rbuf->size, src, size);
-
-		rbuf->size += size;
-
-		if( type == MSG_TYPE_BLKN ) {
-			processmsg(MSG_TYPE_FRAG, rbuf->buf, rbuf->size);
-			rbuf->size = 0;	
-		}
-	}
-
-	if( !frag->inuse ) {
-		freefrag(frag);
-	}
+	freefrag(frag);
 }
 
 
 int mca_btl_nc_component_progress(void)
 {
-	uint64_t ofs = mca_btl_nc_component.shm_ofs;
 	volatile fifolist_t* list = mca_btl_nc_component.myinq;
 
 	if( list->head ) {
@@ -322,6 +265,7 @@ int mca_btl_nc_component_progress(void)
 		return 1;
 	}
 
+	uint64_t shmofs = mca_btl_nc_component.shm_ofs;
 	volatile ring_t* ring = mca_btl_nc_component.ring_desc;
 	node_t* node = mca_btl_nc_component.node;
 	int ring_cnt = node->ring_cnt;
@@ -343,7 +287,7 @@ int mca_btl_nc_component_progress(void)
 
 		int sbit = ((ring->sbit) ^ 1);
 		uint32_t rtail = ring->tail;
-		rhdr_t* rhdr = (rhdr_t*)(ring->buf + ofs + rtail);
+		rhdr_t* rhdr = (rhdr_t*)(ring->buf + shmofs + rtail);
 
 		for( ; ; ) {
 
@@ -371,41 +315,73 @@ int mca_btl_nc_component_progress(void)
 				assert( rsize >= 16 );
 
 				bool local = (rhdr->dst_ndx == mca_btl_nc_component.cpuindex);
+				bool done = false;
+				frag_t* frag;
 
-				frag_t* frag = 0;
+				int size8 = rsize - sizeof(rhdr_t);
+				int ssize = isyncsize(size8);
+				if( size8 > SHDR ) {
+					size8 -= ssize;
+				}
+				int size = size8 - rhdr->pad8;
 
-				if( local ) {
-					frag = mca_btl_nc_component.frag0;
-					if( !frag->inuse ) {
-						frag->inuse = true;
+				void* src = (void*)(rhdr + 1) + ssize;
+				void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+
+				if( !(type & MSG_TYPE_BLK) ) {
+					frag = allocfrag(rsize);
+					if( !frag ) {
+						return 0;
+					}
+
+					frag->msgtype = type;
+					frag->size = size;
+
+					sbitreset(frag + 1, sbits, src, size8, sbit);
+
+					done = true;
+				}
+				else {
+					frag = node->recvfrag[ringndx];
+
+					if( !frag ) {
+						int bufsize = sizeof(rhdr) + ((rhdr->sbits + 7) & ~7);
+
+						frag = allocfrag(bufsize);
+						if( !frag ) {
+							return 0;
+						}
+						node->recvfrag[ringndx] = (void*)frag - shmofs;
+						frag->size = 0;
 					}
 					else {
-						frag = allocfrag(rsize);
+						frag = node->recvfrag[ringndx];
+						frag = (frag_t*)((void*)frag + shmofs);
+						assert( frag );
 					}
-				}
-				else {
-					frag = allocfrag(rsize);
-				}
-				if( !frag ) {
-					return 0;
-				}
 
-				copymsg(frag + 1, rhdr, sbit, rsize);
+					void* dst = (void*)(frag + 1) + frag->size;
+					frag->size += size;
+					
+					sbitreset(dst, sbits, src, size8, sbit);
 
-				frag->sbit = sbit;
-				frag->ringndx = ringndx;
-
-				if( local ) {
-					fifo_push_back((fifolist_t*)list, frag);
-				}
-				else {
-					fifolist_t* list = mca_btl_nc_component.inq + rhdr->dst_ndx;
-					fifo_push_back((fifolist_t*)list, frag);
+					if( type == MSG_TYPE_BLKN ) {
+						frag->msgtype = MSG_TYPE_FRAG;
+						node->recvfrag[ringndx] = 0;
+						done = true;
+					}
 				}
 
 				rtail += rsize;		
 
-				if( (!local && list->head) || (local && ((type == MSG_TYPE_ISEND) || (type == MSG_TYPE_FRAG) || (type == MSG_TYPE_BLKN))) ) {
+				if( done ) {
+					if( local ) {
+						fifo_push_back((fifolist_t*)list, frag);
+					}
+					else {
+						fifolist_t* list = mca_btl_nc_component.inq + rhdr->dst_ndx;
+						fifo_push_back((fifolist_t*)list, frag);
+					}
 					break;
 				}
 
@@ -422,7 +398,7 @@ int mca_btl_nc_component_progress(void)
 				__nccopy4(ptail, 0);
 
 				rtail = 0;
-				rhdr = (rhdr_t*)(ring->buf + ofs);
+				rhdr = (rhdr_t*)(ring->buf + shmofs);
 				ring->ttail = 0;
 				ring->sbit = sbit;
 				sbit ^= 1;
@@ -503,11 +479,14 @@ static void processmsg(int type, const void* src, int size)
 }
 
 
-static void sbitreset(const void* sbits, void* src, int size8, int sbit)
+static void sbitreset(void* dst, const void* sbits, const void* src, int size8, int sbit)
 {
 	// pointer to workload
-	uint64_t* p = (uint64_t*)src;
+	volatile uint64_t* p = (uint64_t*)src;
 	assert( ((uint64_t)p & 0x7) == 0 );
+
+	uint64_t* q = (uint64_t*)dst;
+	assert( ((uint64_t)q & 0x7) == 0 );
 
 	int n = (size8 >> 3);
 
@@ -516,24 +495,27 @@ static void sbitreset(const void* sbits, void* src, int size8, int sbit)
 		b <<= (32 - n);
 
 		for( ; ; ) {
-			assert( ((*p) & 1) == sbit );
+			while( ((*p) & 1) != sbit ) {
+				__lfence();
+			}
 			if( b & (1ul << 31) ) {
-				(*p) |= 1;
+				(*q) = ((*p) | 1);
 			}
 			else {
-				(*p) &= ~1;
+				(*q) = ((*p) & ~1);
 			}
 
 			if( !--n ) {
 				break;
 			}
 			++p;
+			++q;
 			b <<= 1;
 		}
 	}
 	else {
 		// pointer to sync bits
-		uint64_t* _sbits = (uint64_t*)sbits; 
+		volatile uint64_t* _sbits = (uint64_t*)sbits; 
 		assert( ((uint64_t)_sbits & 0x7) == 0 );
 
 		uint64_t b;
@@ -541,7 +523,9 @@ static void sbitreset(const void* sbits, void* src, int size8, int sbit)
 
 		for( ; ; ) {
 			if( !k ) { 
-				assert( ((*_sbits) & 1) == sbit );
+				while( ((*_sbits) & 1) != sbit ) {
+					__lfence();
+				}
 				b = *_sbits++;
 				if( n >= 63 ) {
 					k = 63;
@@ -551,12 +535,14 @@ static void sbitreset(const void* sbits, void* src, int size8, int sbit)
 					b <<= (63 - k);
 				}
 			}
-			assert( ((*p) & 1) == sbit );
+			while( ((*p) & 1) != sbit ) {
+				__lfence();
+			}
 			if( b & (1ull << 63) ) {
-				(*p) |= 1;
+				(*q) = ((*p) | 1);
 			}
 			else {
-				(*p) &= ~1;
+				(*q) = ((*p) & ~1);
 			}
 
 			if( !--n ) {
@@ -564,6 +550,7 @@ static void sbitreset(const void* sbits, void* src, int size8, int sbit)
 			}
 
 			++p;
+			++q;
 			--k;
 			b <<= 1;
 		}
@@ -612,7 +599,7 @@ static void memset8(void* to, uint64_t val, int n)
 }
 
 
-static void	copymsg(void* to, void* from, int sbit, int size)
+static void	copymsg2(void* to, void* from, int sbit, int size)
 {
 	//int n = (rsize >> 3);
 

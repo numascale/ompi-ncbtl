@@ -48,9 +48,8 @@ BEGIN_C_DECLS
 #define MSG_TYPE_ISEND 0x02
 #define MSG_TYPE_FRAG  0x04
 #define MSG_TYPE_ACK   0x06
-
-#define MSG_TYPE_BLK   0x08
-#define MSG_TYPE_BLKN  0x18
+#define MSG_TYPE_BLKN  0x08
+#define MSG_TYPE_BLK   0x18
 #define MSG_TYPE_RST   0x20
 
 
@@ -62,19 +61,15 @@ BEGIN_C_DECLS
 #define MAX_EAGER_SIZE (4 * 1024)
 #define MAX_SEND_SIZE  (16 * 1024)
 #define MAX_MSG_SIZE   (16 * 1024 * 1024)
-
 #define MAX_SIZE_FRAGS (1024 * 1024 * 1024)
 
 #define FRAG_SIZE 48
 #define RHDR_SIZE 8
 #define SHDR      256
+#define MPI_HDR_SIZE 256
 
 #define syncsize(s) ((s <= SHDR) ? 0 : ((((s >> 3) + 62) / 63) << 3))
 #define isyncsize(s) ((s <= SHDR) ? 0 : (((s - 16) >> 9) + 1) << 3)
-
-#define MPI_HDR_SIZE 256
-#define SFRAG_SIZE (FRAG_SIZE + RHDR_SIZE + syncsize(MAX_EAGER_SIZE) + MAX_EAGER_SIZE)
-#define BFRAG_SIZE (FRAG_SIZE + RHDR_SIZE + syncsize(MAX_SEND_SIZE) + MAX_SEND_SIZE)
 
 #define RING_SIZE (64 * 1024)
 #define RING_SIZE_LOG2 (16)
@@ -152,6 +147,18 @@ static void forceinline __nccopy4(void* to, const uint32_t head)
 }
 
 
+static void forceinline __nccopy8(void* to, const void* from)
+{
+    assert( (((uint64_t)from) & 0x7) == 0 );
+    assert( (((uint64_t)to) & 0x7) == 0 );
+
+    __asm__ __volatile__ (
+        "movq (%0), %%rax\n"
+        "movnti %%rax, (%1)\n"
+        :: "r" (from), "r" (to) : "rax", "memory");
+}
+
+
 /*
  * ring header
  */
@@ -163,12 +170,6 @@ typedef struct {
 	uint32_t unused  : 1;
 	uint32_t sbits;		   // synchronization bits
 } rhdr_t;
-
-
-typedef struct {
-	int32_t size;
-	void*   buf;
-} recvbuf_t;
 
 
 /*  An abstraction that represents a connection to a endpoint process.
@@ -196,16 +197,16 @@ struct fifolist; // forward declaration
  * message fragment
  */
 typedef struct frag {
-	struct frag* next;
-	int32_t		 nseq;		// nseq frags in this sequence (nseq - 1 following next)
-	int32_t      numanode;	// target numanode
-	int32_t      size;		// message body size including mpi headers
-	int32_t      rsize;     // total size in ring
-	int32_t      sbit;      // synchronization bit
-	bool         small;     // fragment small/large flag
+	int32_t      fsize;		// frag size
 	bool         inuse;     // fragment is in use
-	int32_t      ringndx;   // index of ring message was received in
-	void*        data;		// pointer to mpi data appended after frag and ring header
+	int32_t      size;		// message body size including mpi headers
+	int32_t      prevsize;	// previous frag size
+	int32_t      numanode;	// target numanode
+	int32_t      ofs;		// offset of data already procesed
+	int32_t      rsize;     // total size in ring
+	bool         lastfrag;  // last frag in pool
+	int32_t      msgtype;
+	struct frag* next;		// next in list, next in pool is determined by size
 } frag_t;
 
 
@@ -243,16 +244,6 @@ struct msgstats_t {
 
 typedef struct {
 	volatile int32_t lock;
-	fifolist_t sfrags;			// free small fragments
-	fifolist_t bfrags;			// free big fragments
-	void*	   shm_frags;		// base of frags in shared mem
-	void*      shm_frags_low;			   
-	uint64_t   frags_rest;
-} fragpool_t;
-
-
-typedef struct {
-	volatile int32_t lock;
 	uint32_t tail;  // read tail
 	int32_t  sbit;  // sync bit
 	int32_t  ttail; // ring reset flag
@@ -275,7 +266,12 @@ typedef struct {
 	void*         shm_base;
 	int32_t       ring_cnt;
 	volatile int32_t commit_ring ALIGN8;
-	fragpool_t    fragpool;
+
+	volatile int32_t fraglock;
+	void*	       shm_frags;		// base of frags in shared mem
+
+	frag_t*       recvfrag[MAX_PROCS_PER_NODE];
+
 	// !must be last member
 	int32_t       ndxmax ALIGN8;	// max peer index on local node
 } node_t;
@@ -321,6 +317,7 @@ struct mca_btl_nc_component_t {
 	void*      shm_base;
 	void*      shm_ringbase;
 	void*      shm_fragbase;
+//uint64_t      shm_fraguse;
 	uint64_t   shm_ofs;
 	uint64_t   ring_ofs;
 	uint64_t   frag_ofs;
@@ -328,9 +325,6 @@ struct mca_btl_nc_component_t {
 	ring_t*    ring_desc;
 	pring_t*   peer_ring_desc;
 	void**     peer_ring_buf;
-
-	frag_t*    frag0;
-	recvbuf_t* recvbuf;
 
     int32_t    num_smp_procs;		// current number of smp procs on this host
     int32_t    my_smp_rank;			// My SMP process rank.  Used for accessing
