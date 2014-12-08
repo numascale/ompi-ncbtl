@@ -81,6 +81,9 @@ BEGIN_C_DECLS
 #define ALIGN64 __attribute__ ((aligned (64)))
 #define forceinline inline __attribute__((always_inline))
 
+#define NODEADDR(ptr) ((void*)ptr - mca_btl_nc_component.shm_ofs)
+#define PROCADDR(ptr) ((void*)ptr + mca_btl_nc_component.shm_ofs)
+
 
 static void forceinline __semlock(volatile int32_t* v)
 {
@@ -167,7 +170,7 @@ typedef struct {
 	uint32_t dst_ndx : 6;  // destination cpu index in group sharing ring
 	uint32_t rsize   : 16; // size in ring
 	uint32_t pad8    : 3;  // padding bytes used for 8 bytes alignment
-	uint32_t unused  : 1;
+	uint32_t sync    : 1;  // message uses 1 sync bit on every 8 bytes
 	uint32_t sbits;		   // synchronization bits
 } rhdr_t;
 
@@ -201,6 +204,7 @@ typedef struct frag {
 	bool         inuse;     // fragment is in use
 	int32_t      size;		// message body size including mpi headers
 	int32_t      prevsize;	// previous frag size
+	int32_t      peer;
 	int32_t      numanode;	// target numanode
 	int32_t      ofs;		// offset of data already procesed
 	int32_t      rsize;     // total size in ring
@@ -261,19 +265,20 @@ typedef struct {
 
 
 typedef struct {
-	volatile bool active;
-	bool          yieldcpu;
-	void*         shm_base;
-	int32_t       ring_cnt;
+	volatile bool    active;
+	bool             yieldcpu;
+	void*            shm_base;
+	int32_t          ring_cnt;
 	volatile int32_t commit_ring ALIGN8;
 
 	volatile int32_t fraglock;
-	void*	       shm_frags;		// base of frags in shared mem
-
-	frag_t*       recvfrag[MAX_PROCS_PER_NODE];
+	void*	         shm_frags;		// base of frags in shared mem
+	frag_t*          recvfrag[MAX_PROCS_PER_NODE];
+//	uint64_t*		 sendmask;
+	int32_t*    sendqcnt;
 
 	// !must be last member
-	int32_t       ndxmax ALIGN8;	// max peer index on local node
+	int32_t          ndxmax ALIGN8;	// max peer index on local node
 } node_t;
 
 
@@ -281,6 +286,7 @@ typedef struct {
 	int      max_nodes;
 	int      node_count;
 	int      rank_count;
+int n;
 	uint32_t map[MAX_PROCS];
 	uint32_t cpuid[MAX_PROCS];
 } sysctxt_t;
@@ -307,6 +313,8 @@ struct mca_btl_nc_component_t {
 
 	fifolist_t* inq;				// input queues
 	fifolist_t* myinq;				// local input queue
+//	uint64_t*	sendmask;
+	int32_t*    sendqcnt;
 
 	uint32_t*  map;
 
@@ -317,7 +325,6 @@ struct mca_btl_nc_component_t {
 	void*      shm_base;
 	void*      shm_ringbase;
 	void*      shm_fragbase;
-//uint64_t      shm_fraguse;
 	uint64_t   shm_ofs;
 	uint64_t   ring_ofs;
 	uint64_t   frag_ofs;

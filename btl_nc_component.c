@@ -65,7 +65,6 @@ static int nc_register(void);
 static void processmsg(int type, const void* src, int size);
 static void sbitreset(void* dst, const void* sbits, const void* src, int size8, int sbit);
 static void memcpy8(void* to, const void* from, int n);
-static void memset8(void* to, uint64_t val, int n);
 static void	copymsg(void* to, void* from, int sbit, int size8);
 static mca_btl_base_module_t** mca_btl_nc_component_init(
     int *num_btls,
@@ -73,6 +72,7 @@ static mca_btl_base_module_t** mca_btl_nc_component_init(
     bool enable_mpi_threads
 );
 
+void memset8(void* to, uint64_t val, int n);
 void sendack(int peer, void* hdr);
 frag_t* allocfrag(int size);
 void freefrag(frag_t* frag);
@@ -319,14 +319,14 @@ int mca_btl_nc_component_progress(void)
 				frag_t* frag;
 
 				int size8 = rsize - sizeof(rhdr_t);
-				int ssize = isyncsize(size8);
+				int ssize = rhdr->sync ? isyncsize(size8) : 0;
 				if( size8 > SHDR ) {
 					size8 -= ssize;
 				}
 				int size = size8 - rhdr->pad8;
 
-				void* src = (void*)(rhdr + 1) + ssize;
-				void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+//fprintf(stderr, "%d RECV size %d, rsize %d, size8 %d, direct %d, type 0x%x \n", 
+//	MY_RANK, size, rsize, size8, direct, type);
 
 				if( !(type & MSG_TYPE_BLK) ) {
 					frag = allocfrag(rsize);
@@ -337,8 +337,14 @@ int mca_btl_nc_component_progress(void)
 					frag->msgtype = type;
 					frag->size = size;
 
-					sbitreset(frag + 1, sbits, src, size8, sbit);
-
+					if( rhdr->sync ) {
+						void* src = (void*)(rhdr + 1) + ssize;
+						void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+						sbitreset(frag + 1, sbits, src, size8, sbit);
+					}
+					else {
+						copymsg(frag + 1, rhdr + 1, sbit, size8);
+					}
 					done = true;
 				}
 				else {
@@ -362,8 +368,15 @@ int mca_btl_nc_component_progress(void)
 
 					void* dst = (void*)(frag + 1) + frag->size;
 					frag->size += size;
-					
-					sbitreset(dst, sbits, src, size8, sbit);
+
+					if( rhdr->sync ) {
+						void* src = (void*)(rhdr + 1) + ssize;
+						void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+						sbitreset(dst, sbits, src, size8, sbit);
+					}
+					else {
+						copymsg(dst, rhdr + 1, sbit, size8);
+					}
 
 					if( type == MSG_TYPE_BLKN ) {
 						frag->msgtype = MSG_TYPE_FRAG;
@@ -580,7 +593,7 @@ static void memcpy8(void* to, const void* from, int n)
 }
 
 
-static void memset8(void* to, uint64_t val, int n)
+void memset8(void* to, uint64_t val, int n)
 {
     assert( n > 0 );
 	assert( (n & 0x7) == 0 );
@@ -599,9 +612,33 @@ static void memset8(void* to, uint64_t val, int n)
 }
 
 
-static void	copymsg2(void* to, void* from, int sbit, int size)
+static void	copymsg(void* to, void* from, int sbit, int size8)
 {
-	//int n = (rsize >> 3);
+    assert( size8 > 0 );
+	assert( (size8 & 0x7) == 0 );
+	assert( (((uint64_t)from) & 0x7) == 0 );
+	assert( (((uint64_t)to) & 0x7) == 0 );
+
+	uint64_t _sbit = sbit;
+
+	__asm__ __volatile__ (
+		"movl %0, %%ecx\n"
+		"shr  $3, %%ecx\n"
+		"movq %1, %%rbx\n"
+		"movq %2, %%rsi\n"
+		"movq %3, %%rdi\n"
+		"1:\n"
+		"movq (%%rsi), %%rax\n"
+		"movq %%rax, (%%rdi)\n"
+		"movq %%rbx, (%%rsi)\n"
+		"addq $8, %%rsi\n" 
+		"addq $8, %%rdi\n" 
+		"loop 1b\n"
+	    : : "r" (size8), "r" (_sbit), "r" (from), "r" (to) : "ecx", "rax", "rbx", "rsi", "rdi", "memory");
+
+
+
+	//int n = (size8 >> 3);
 
 	//volatile uint64_t* p = (uint64_t*)from;
 	//assert( ((uint64_t)p & 0x7) == 0 );
@@ -622,29 +659,29 @@ static void	copymsg2(void* to, void* from, int sbit, int size)
 	//}
 
 
-	__asm__ __volatile__ (
-		"lfence\n"
-		"movl %0, %%ecx\n"
-		"shr  $3, %%ecx\n"
-		"movl %1, %%ebx\n"
-		"movq %2, %%rsi\n"
-		"movq %3, %%rdi\n"
-		"1:\n"
-		"movq (%%rsi), %%rax\n"
-		"movq %%rax, %%rdx\n"
-		"andq $1, %%rdx\n"
-		"cmpq %%rdx, %%rbx\n"
-		"jnz 2f\n"
-		"movq %%rax, (%%rdi)\n"
-		"addq $8, %%rsi\n" 
-		"addq $8, %%rdi\n" 
-		"loop 1b\n"
-		"jmp  3f\n"
-		"2:\n"
-		"lfence\n"
-		"jmp 1b\n"
-		"3:\n"
-	    : : "r" (size), "r" (sbit), "r" (from), "r" (to) : "ecx", "rax", "rbx", "rdx", "rsi", "rdi", "memory");
+	//__asm__ __volatile__ (
+	//	"lfence\n"
+	//	"movl %0, %%ecx\n"
+	//	"shr  $3, %%ecx\n"
+	//	"movl %1, %%ebx\n"
+	//	"movq %2, %%rsi\n"
+	//	"movq %3, %%rdi\n"
+	//	"1:\n"
+	//	"movq (%%rsi), %%rax\n"
+	//	"movq %%rax, %%rdx\n"
+	//	"andq $1, %%rdx\n"
+	//	"cmpq %%rdx, %%rbx\n"
+	//	"jnz 2f\n"
+	//	"movq %%rax, (%%rdi)\n"
+	//	"addq $8, %%rsi\n" 
+	//	"addq $8, %%rdi\n" 
+	//	"loop 1b\n"
+	//	"jmp  3f\n"
+	//	"2:\n"
+	//	"lfence\n"
+	//	"jmp 1b\n"
+	//	"3:\n"
+	//    : : "r" (size8), "r" (sbit), "r" (from), "r" (to) : "ecx", "rax", "rbx", "rdx", "rsi", "rdi", "memory");
 }
 
 
