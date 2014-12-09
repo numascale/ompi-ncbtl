@@ -274,8 +274,9 @@ typedef struct {
 	volatile int32_t fraglock;
 	void*	         shm_frags;		// base of frags in shared mem
 	frag_t*          recvfrag[MAX_PROCS_PER_NODE];
-//	uint64_t*		 sendmask;
-	int32_t*    sendqcnt;
+	int32_t*         sendqcnt;
+
+uint64_t dtsbit;
 
 	// !must be last member
 	int32_t          ndxmax ALIGN8;	// max peer index on local node
@@ -313,7 +314,6 @@ struct mca_btl_nc_component_t {
 
 	fifolist_t* inq;				// input queues
 	fifolist_t* myinq;				// local input queue
-//	uint64_t*	sendmask;
 	int32_t*    sendqcnt;
 
 	uint32_t*  map;

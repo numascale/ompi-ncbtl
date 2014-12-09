@@ -207,15 +207,14 @@ mca_btl_base_module_t** mca_btl_nc_component_init(
 static void fifo_push_back(fifolist_t* list, frag_t* frag)
 {
 	frag->next = 0;
-	uint64_t ofs = mca_btl_nc_component.shm_ofs;
 
 	// transfer fragment to local nodes address space
-	frag = (frag_t*)((void*)frag - ofs);
+	frag = (frag_t*)NODEADDR(frag);
 
 	__semlock(&list->lock);
 
 	if( list->head ) {
-		frag_t* tail = (frag_t*)((void*)list->tail + ofs);
+		frag_t* tail = (frag_t*)PROCADDR(list->tail);
 		tail->next = frag;
 	}
 	else {
@@ -276,11 +275,6 @@ int mca_btl_nc_component_progress(void)
 		__builtin_prefetch((void*)ringnext);
 
 		if( !__semtrylock(&ring->lock) ) {
-
-			if( list->head ) {
-				processlist();
-				return 1;
-			}
 			ring = ringnext;
 			continue;
 		}
@@ -324,9 +318,6 @@ int mca_btl_nc_component_progress(void)
 					size8 -= ssize;
 				}
 				int size = size8 - rhdr->pad8;
-
-//fprintf(stderr, "%d RECV size %d, rsize %d, size8 %d, direct %d, type 0x%x \n", 
-//	MY_RANK, size, rsize, size8, direct, type);
 
 				if( !(type & MSG_TYPE_BLK) ) {
 					frag = allocfrag(rsize);
@@ -635,55 +626,5 @@ static void	copymsg(void* to, void* from, int sbit, int size8)
 		"addq $8, %%rdi\n" 
 		"loop 1b\n"
 	    : : "r" (size8), "r" (_sbit), "r" (from), "r" (to) : "ecx", "rax", "rbx", "rsi", "rdi", "memory");
-
-
-
-	//int n = (size8 >> 3);
-
-	//volatile uint64_t* p = (uint64_t*)from;
-	//assert( ((uint64_t)p & 0x7) == 0 );
-
-	//uint64_t* q = (uint64_t*)to;
-	//assert( ((uint64_t)q & 0x7) == 0 );
-
-	//// handle out-of-order receives
-	//__lfence();
-	//while( n ) {
-	//	if( ((*p) & 1) == sbit ) {
-	//		*q++ = *p++;
-	//		--n;
-	//	}		
-	//	else {
-	//		__lfence();
-	//	}
-	//}
-
-
-	//__asm__ __volatile__ (
-	//	"lfence\n"
-	//	"movl %0, %%ecx\n"
-	//	"shr  $3, %%ecx\n"
-	//	"movl %1, %%ebx\n"
-	//	"movq %2, %%rsi\n"
-	//	"movq %3, %%rdi\n"
-	//	"1:\n"
-	//	"movq (%%rsi), %%rax\n"
-	//	"movq %%rax, %%rdx\n"
-	//	"andq $1, %%rdx\n"
-	//	"cmpq %%rdx, %%rbx\n"
-	//	"jnz 2f\n"
-	//	"movq %%rax, (%%rdi)\n"
-	//	"addq $8, %%rsi\n" 
-	//	"addq $8, %%rdi\n" 
-	//	"loop 1b\n"
-	//	"jmp  3f\n"
-	//	"2:\n"
-	//	"lfence\n"
-	//	"jmp 1b\n"
-	//	"3:\n"
-	//    : : "r" (size8), "r" (sbit), "r" (from), "r" (to) : "ecx", "rax", "rbx", "rdx", "rsi", "rdi", "memory");
 }
-
-
-
 

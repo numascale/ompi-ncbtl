@@ -370,7 +370,6 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
     size_t pagesize = sysconf(_SC_PAGESIZE);
 	int max_nodes = numa_num_configured_nodes();
 	int max_cpus = numa_num_configured_cpus();
-	max_cpus = ((max_cpus + 1) & ~1);
 
 	size_t stailsize = ((max_nodes * sizeof(NC_CLSIZE) + pagesize - 1) & ~(pagesize - 1));
 	size_t noderecsize = ((sizeof(node_t) + pagesize - 1) & ~(pagesize - 1));
@@ -439,9 +438,8 @@ sysctxt->n = n;
 	shmsize = max_nodes * sizeof(ring_t);
 	shmsize += max_nodes * sizeof(pring_t);
 	shmsize += sizeof(fifolist_t);
-	shmsize += max_cpus * sizeof(int32_t);	
+	shmsize += n * sizeof(int32_t);	
 	shmsize += max_nodes * sizeof(fifolist_t);
-//	shmsize += 64 * sizeof(uint64_t);	
 	shmsize = (shmsize + pagesize - 1) & ~(pagesize - 1);
 
 	size_t ring_ofs = shmsize;
@@ -480,7 +478,7 @@ sysctxt->n = n;
 								+ max_nodes * sizeof(ring_t)
 								+ max_nodes * sizeof(pring_t)
 								+ sizeof(fifolist_t)
-								+ max_cpus * sizeof(int32_t);
+								+ n * sizeof(int32_t);
 
 	mca_btl_nc_component.myinq = mca_btl_nc_component.inq + cpuindex;
 
@@ -488,7 +486,7 @@ sysctxt->n = n;
 								+ max_nodes * sizeof(ring_t)
 								+ max_nodes * sizeof(pring_t)
 								+ sizeof(fifolist_t);
-//								+ max_nodes * sizeof(fifolist_t);
+								
 	if( cpuindex == 0 ) {	
 		pthread_create(&mca_btl_nc_component.sendthread, 0, &sendthread, 0);
 	}
@@ -873,8 +871,8 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 
     // if there are already pending sends to peer, this message must be queued also
 //    bool queued = (bool)mca_btl_nc_component.pending_sends[peer_numanode].head;
-	bool queued = (bool)mca_btl_nc_component.sendqcnt[peer];
-
+    bool queued = (bool)mca_btl_nc_component.sendqcnt[peer];
+	
     int sbit;
     uint8_t* rbuf;
     frag_t* frag;
@@ -933,7 +931,8 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 		frag->ofs = 0;
 	    frag->msgtype = MSG_TYPE_ISEND;
 		frag->peer = peer;
-		lockedAdd(&(mca_btl_nc_component.sendqcnt[peer]), 1);
+
+		lockedAdd(&mca_btl_nc_component.sendqcnt[peer], 1);
 
 		fifo_push_back(mca_btl_nc_component.pending_sends, frag);
 		return OMPI_SUCCESS;
@@ -1085,7 +1084,7 @@ int mca_btl_nc_send( struct mca_btl_base_module_t* btl,
 	rhdr->dst_ndx = (dst & 0xffff);
 	rhdr->sync = (numa_distance(peer_numanode, mca_btl_nc_component.numanode) > 100);
 
-	lockedAdd(&(mca_btl_nc_component.sendqcnt[peer]), 1);
+	lockedAdd(&mca_btl_nc_component.sendqcnt[peer], 1);
 
 	fifo_push_back(mca_btl_nc_component.pending_sends, frag);
 
@@ -1225,7 +1224,7 @@ void sendack(int peer, void* hdr)
 		frag->rsize = rsize;
 	    frag->msgtype = MSG_TYPE_ACK;
 
-		lockedAdd(&(mca_btl_nc_component.sendqcnt[peer]), 1);
+		lockedAdd(&mca_btl_nc_component.sendqcnt[peer], 1);
 
 		fifolist_t* list = mca_btl_nc_component.pending_sends;
 		fifo_push_back(list, frag);
@@ -1389,7 +1388,6 @@ void freefrag(frag_t* frag)
 // append to fifo list, multiple producers, single consumer
 static void fifo_push_back(fifolist_t* list, frag_t* frag)
 {
-	uint64_t ofs = mca_btl_nc_component.shm_ofs;
 	frag->next = 0;
 
 	// transfer fragment to local nodes address space
@@ -1584,26 +1582,43 @@ static void sbitset(void* sbits, void* data, int size8, int sbit)
 	uint64_t b = 0;
 	int k = 0;
 
-	for( int i = 0; i < n; i++ ) {
-		b |= ((*p) & 1);
-		b <<= 1;
+	if( sbit ) {
+		for( int i = 0; i < n; i++ ) {
 
-		if( sbit ) {
+			b |= ((*p) & 1);
+			b <<= 1;
 			(*p) |= 1;
-		}
-		else {
-			(*p) &= ~1;
-		}
-		++p;
+			++p;	
 
-		if( ++k >= 63 ) {
-			*q++ = (b | sbit);
+			if( ++k < 63 ) {
+				continue;
+			}
+			*q++ = (b | 1);
 			b = 0;
-			k = 0;
+			k = 0;			
+		}
+		if( k ) {
+			*q = (b | 1);
 		}
 	}
-	if( k ) {
-		*q = (b | sbit);
+	else {
+		for( int i = 0; i < n; i++ ) {
+
+			b |= ((*p) & 1);
+			b <<= 1;
+			(*p) &= ~1;
+			++p;
+
+			if( ++k < 63 ) {
+				continue;
+			}
+			*q++ = b;
+			b = 0;
+			k = 0;
+		}	
+		if( k ) {
+			*q = b;
+		}
 	}
 }
 
@@ -1702,18 +1717,29 @@ static void* sendthread(void* arg)
 
 					lockedAdd(&(node->sendqcnt[frag->peer]), -1);
 
-					__semlock(&list->lock);
-					if( prev ) {
-						prev->next = frag->next;
-
-						if( !prev->next ) {
-							list->tail = prev;
+					if( next ) {
+						if( prev ) {
+							prev->next = next;						
 						}
+						else {
+							list->head = next;
+						}	
 					}
 					else {
-						list->head = frag->next;
+						__semlock(&list->lock);
+						next = frag->next;
+						if( prev ) {
+							prev->next = next;
+
+							if( !next ) {
+								list->tail = prev;
+							}
+						}
+						else {
+							list->head = next;
+						}
+						__semunlock(&list->lock);
 					}
-					__semunlock(&list->lock);
 
 					freefrag(frag);
 				}
@@ -1746,6 +1772,13 @@ static void* sendthread(void* arg)
 			sched_yield();
 		}
 	}
+/*
+uint64_t* ptr = &(mca_btl_nc_component.node->dtsbit);
+double dt = (double)(*ptr) / 2.6e6;
+
+fprintf(stderr, "%d >>>>>>>>>>>>> dt %.1lf\n", mca_btl_nc_component.numanode, dt);
+fflush(stderr);
+*/
 	return NULL;
 }
 
@@ -1766,7 +1799,7 @@ static void* sendthread(void* arg)
 	int max_nodes = sysctxt->max_nodes;
 
 	node->shm_base = mca_btl_nc_component.shm_base;
-	node->sendmask = mca_btl_nc_component.sendmask;
+	node->sendqcnt = mca_btl_nc_component.sendqcnt;
 
 	node->shm_frags = node->shm_base + mca_btl_nc_component.frag_ofs;
 	frag_t* frag = (frag_t*)node->shm_frags;
@@ -1800,6 +1833,9 @@ static void* sendthread(void* arg)
 				frag_t* frag = list->head;
 
 				if( send_msg(frag) ) {
+
+					lockedAdd(&(node->sendqcnt[frag->peer]), -1);
+
 					if( frag->next ) {
 						list->head = frag->next;
 					}
