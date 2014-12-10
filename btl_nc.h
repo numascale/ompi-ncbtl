@@ -55,7 +55,7 @@ BEGIN_C_DECLS
 
 #define NC_CLSIZE (64)    // cache line size
 
-#define MAX_PROCS 16384
+#define MAX_PROCS 1024
 #define MAX_PROCS_PER_NODE 32
 
 #define MAX_EAGER_SIZE (4 * 1024)
@@ -66,13 +66,14 @@ BEGIN_C_DECLS
 #define FRAG_SIZE 48
 #define RHDR_SIZE 8
 #define SHDR      256
-#define MPI_HDR_SIZE 256
 
 #define syncsize(s) ((s <= SHDR) ? 0 : ((((s >> 3) + 62) / 63) << 3))
 #define isyncsize(s) ((s <= SHDR) ? 0 : (((s - 16) >> 9) + 1) << 3)
 
-#define RING_SIZE (64 * 1024)
-#define RING_SIZE_LOG2 (16)
+#define INTRA_NODE_DIST_MAX 40
+
+#define RING_SIZE (256 * 1024)
+#define RING_SIZE_LOG2 (18)
 
 #define SEMLOCK_UNLOCKED 0
 #define SEMLOCK_LOCKED 1
@@ -170,7 +171,7 @@ typedef struct {
 	uint32_t dst_ndx : 6;  // destination cpu index in group sharing ring
 	uint32_t rsize   : 16; // size in ring
 	uint32_t pad8    : 3;  // padding bytes used for 8 bytes alignment
-	uint32_t sync    : 1;  // message uses 1 sync bit on every 8 bytes
+	uint32_t unused  : 1;  // unused
 	uint32_t sbits;		   // synchronization bits
 } rhdr_t;
 
@@ -205,7 +206,7 @@ typedef struct frag {
 	int32_t      size;		// message body size including mpi headers
 	int32_t      prevsize;	// previous frag size
 	int32_t      peer;
-	int32_t      numanode;	// target numanode
+	int32_t      node;	    // target node
 	int32_t      ofs;		// offset of data already procesed
 	int32_t      rsize;     // total size in ring
 	bool         lastfrag;  // last frag in pool
@@ -270,25 +271,28 @@ typedef struct {
 	void*            shm_base;
 	int32_t          ring_cnt;
 	volatile int32_t commit_ring ALIGN8;
-
 	volatile int32_t fraglock;
 	void*	         shm_frags;		// base of frags in shared mem
 	frag_t*          recvfrag[MAX_PROCS_PER_NODE];
 	int32_t*         sendqcnt;
-
-uint64_t dtsbit;
-
 	// !must be last member
 	int32_t          ndxmax ALIGN8;	// max peer index on local node
 } node_t;
 
 
 typedef struct {
+	volatile int32_t lock;
+	int      readycnt;
 	int      max_nodes;
 	int      node_count;
 	int      rank_count;
-int n;
-	uint32_t map[MAX_PROCS];
+//uint32_t msgcnt0;
+//uint32_t msgcnt1;
+//uint32_t msgcnt2;
+//uint32_t msgcnt3;
+//uint32_t msgcnt4;
+//uint32_t msgcnt5;
+	uint32_t map[MAX_PROCS]; // (group | cpuindex)
 	uint32_t cpuid[MAX_PROCS];
 } sysctxt_t;
 
@@ -299,8 +303,7 @@ int n;
 struct mca_btl_nc_component_t {
     mca_btl_base_component_2_0_0_t super;  /**< base BTL component */
 
-	int32_t    numanode;
-	int32_t    cpuid;
+	int32_t    group;
 	int32_t    cpuindex;
 	int        statistics;			// create statistics
 	uint8_t*   shm_stat;			// statistics buffer
@@ -319,7 +322,7 @@ struct mca_btl_nc_component_t {
 	uint32_t*  map;
 
 	node_t**   peer_node;
-	node_t*    node;
+	node_t*    nodedesc;
 
 	uint64_t   shmsize;
 	void*      shm_base;

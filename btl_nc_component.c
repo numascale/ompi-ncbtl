@@ -65,7 +65,6 @@ static int nc_register(void);
 static void processmsg(int type, const void* src, int size);
 static void sbitreset(void* dst, const void* sbits, const void* src, int size8, int sbit);
 static void memcpy8(void* to, const void* from, int n);
-static void	copymsg(void* to, void* from, int sbit, int size8);
 static mca_btl_base_module_t** mca_btl_nc_component_init(
     int *num_btls,
     bool enable_progress_threads,
@@ -156,7 +155,7 @@ static int mca_btl_nc_component_close(void)
 {
 	if( (uint64_t)mca_btl_nc_component.sendthread ) {
 
-		mca_btl_nc_component.node->active = 0;
+		mca_btl_nc_component.nodedesc->active = 0;
 		__sfence();
 
 		pthread_join(mca_btl_nc_component.sendthread, 0);
@@ -207,8 +206,6 @@ mca_btl_base_module_t** mca_btl_nc_component_init(
 static void fifo_push_back(fifolist_t* list, frag_t* frag)
 {
 	frag->next = 0;
-
-	// transfer fragment to local nodes address space
 	frag = (frag_t*)NODEADDR(frag);
 
 	__semlock(&list->lock);
@@ -232,9 +229,8 @@ static void processlist()
 
 	assert( list->head );
 
-	// transfer fragment from local nodes to peers address space
 	frag_t* frag = list->head;
-	frag = (frag_t*)((void*)frag + mca_btl_nc_component.shm_ofs);
+	frag = (frag_t*)PROCADDR(frag);
 
 	if( frag->next ) {
 		list->head = frag->next;
@@ -266,8 +262,8 @@ int mca_btl_nc_component_progress(void)
 
 	uint64_t shmofs = mca_btl_nc_component.shm_ofs;
 	volatile ring_t* ring = mca_btl_nc_component.ring_desc;
-	node_t* node = mca_btl_nc_component.node;
-	int ring_cnt = node->ring_cnt;
+	node_t* nodedesc = mca_btl_nc_component.nodedesc;
+	int ring_cnt = nodedesc->ring_cnt;
 
 	for( int ringndx = 0; ringndx < ring_cnt; ringndx++ ) {
 
@@ -309,11 +305,12 @@ int mca_btl_nc_component_progress(void)
 				assert( rsize >= 16 );
 
 				bool local = (rhdr->dst_ndx == mca_btl_nc_component.cpuindex);
+
 				bool done = false;
 				frag_t* frag;
 
 				int size8 = rsize - sizeof(rhdr_t);
-				int ssize = rhdr->sync ? isyncsize(size8) : 0;
+				int ssize = isyncsize(size8);
 				if( size8 > SHDR ) {
 					size8 -= ssize;
 				}
@@ -328,18 +325,13 @@ int mca_btl_nc_component_progress(void)
 					frag->msgtype = type;
 					frag->size = size;
 
-					if( rhdr->sync ) {
-						void* src = (void*)(rhdr + 1) + ssize;
-						void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
-						sbitreset(frag + 1, sbits, src, size8, sbit);
-					}
-					else {
-						copymsg(frag + 1, rhdr + 1, sbit, size8);
-					}
+					void* src = (void*)(rhdr + 1) + ssize;
+					void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+					sbitreset(frag + 1, sbits, src, size8, sbit);
 					done = true;
 				}
 				else {
-					frag = node->recvfrag[ringndx];
+					frag = nodedesc->recvfrag[ringndx];
 
 					if( !frag ) {
 						int bufsize = sizeof(rhdr) + ((rhdr->sbits + 7) & ~7);
@@ -348,11 +340,11 @@ int mca_btl_nc_component_progress(void)
 						if( !frag ) {
 							return 0;
 						}
-						node->recvfrag[ringndx] = (void*)frag - shmofs;
+						nodedesc->recvfrag[ringndx] = (void*)frag - shmofs;
 						frag->size = 0;
 					}
 					else {
-						frag = node->recvfrag[ringndx];
+						frag = nodedesc->recvfrag[ringndx];
 						frag = (frag_t*)((void*)frag + shmofs);
 						assert( frag );
 					}
@@ -360,18 +352,13 @@ int mca_btl_nc_component_progress(void)
 					void* dst = (void*)(frag + 1) + frag->size;
 					frag->size += size;
 
-					if( rhdr->sync ) {
-						void* src = (void*)(rhdr + 1) + ssize;
-						void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
-						sbitreset(dst, sbits, src, size8, sbit);
-					}
-					else {
-						copymsg(dst, rhdr + 1, sbit, size8);
-					}
+					void* src = (void*)(rhdr + 1) + ssize;
+					void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+					sbitreset(dst, sbits, src, size8, sbit);
 
 					if( type == MSG_TYPE_BLKN ) {
 						frag->msgtype = MSG_TYPE_FRAG;
-						node->recvfrag[ringndx] = 0;
+						nodedesc->recvfrag[ringndx] = 0;
 						done = true;
 					}
 				}
@@ -448,7 +435,6 @@ static void processmsg(int type, const void* src, int size)
 	}
 	else
 	if( type == MSG_TYPE_FRAG ) {
-
         mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)src;
 
         mca_btl_nc_hdr_t msg;
@@ -601,30 +587,3 @@ void memset8(void* to, uint64_t val, int n)
 		"loop 1b\n"
 	    : : "r" (n), "r" (val), "r" (to) : "ecx", "rax", "rdi", "memory");
 }
-
-
-static void	copymsg(void* to, void* from, int sbit, int size8)
-{
-    assert( size8 > 0 );
-	assert( (size8 & 0x7) == 0 );
-	assert( (((uint64_t)from) & 0x7) == 0 );
-	assert( (((uint64_t)to) & 0x7) == 0 );
-
-	uint64_t _sbit = sbit;
-
-	__asm__ __volatile__ (
-		"movl %0, %%ecx\n"
-		"shr  $3, %%ecx\n"
-		"movq %1, %%rbx\n"
-		"movq %2, %%rsi\n"
-		"movq %3, %%rdi\n"
-		"1:\n"
-		"movq (%%rsi), %%rax\n"
-		"movq %%rax, (%%rdi)\n"
-		"movq %%rbx, (%%rsi)\n"
-		"addq $8, %%rsi\n" 
-		"addq $8, %%rdi\n" 
-		"loop 1b\n"
-	    : : "r" (size8), "r" (_sbit), "r" (from), "r" (to) : "ecx", "rax", "rbx", "rsi", "rdi", "memory");
-}
-
