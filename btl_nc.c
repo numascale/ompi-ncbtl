@@ -1590,7 +1590,7 @@ static void init_ring(int peer_node)
 	assert( peer_node != loc_node );
 
 	volatile pring_t* pr = mca_btl_nc_component.peer_ring_desc + peer_node;
-
+/*
 	if( !pr->commited ) {
 		if( !__semtrylock(&pr->lock) ) {
 			return;
@@ -1617,7 +1617,7 @@ static void init_ring(int peer_node)
 		}
 		__semunlock(&pr->lock);
 	}
-
+*/
 	void* ring_base = map_shm(peer_node, mca_btl_nc_component.shmsize);
 	assert( ring_base );
 
@@ -1820,6 +1820,13 @@ static void* sendthread(void* arg)
 	// init node structure, dont clear last structure member cpuindex
 	memset(nodedesc, 0, offsetof(node_t, ndxmax));
 	memset(mca_btl_nc_component.shm_base, 0, mca_btl_nc_component.ring_ofs);
+
+	for( int i = 0; i < 26; i++ ) {
+		commit_ring(i);
+	}
+
+//fprintf(stderr, "%d COMMIT DONE...\n", mca_btl_nc_component.group);
+//fflush(stderr);
 
 	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
 	int max_nodes = sysctxt->max_nodes;
