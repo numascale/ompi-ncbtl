@@ -925,7 +925,7 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 		}
 	}
 
-	if( !rbuf ) {
+	if( queued ) {
 		frag->numanode = peer_numanode;
 		frag->size = size;
 		frag->ofs = 0;
