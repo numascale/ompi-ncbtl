@@ -70,7 +70,7 @@ BEGIN_C_DECLS
 #define syncsize(s) ((s <= SHDR) ? 0 : ((((s >> 3) + 62) / 63) << 3))
 #define isyncsize(s) ((s <= SHDR) ? 0 : (((s - 16) >> 9) + 1) << 3)
 
-#define INTRA_NODE_DIST_MAX 40
+#define INTRA_NODE_DIST_MAX 22
 
 #define RING_SIZE (256 * 1024)
 #define RING_SIZE_LOG2 (18)

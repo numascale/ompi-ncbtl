@@ -1592,20 +1592,28 @@ static void init_ring(int peer_node)
 	volatile pring_t* pr = mca_btl_nc_component.peer_ring_desc + peer_node;
 
 	if( !pr->commited ) {
-		__semlock(&pr->lock);
+		if( !__semtrylock(&pr->lock) ) {
+			return;
+		}
 
 		if( !pr->commited ) {
 			// commit rings address space
-			pr->commited = true;
 
 			// pr->buf is pointer to remote ring, address is based on mapping for local nodes process
-			node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
+			volatile node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
 
 			// send request to commit ring on target node
-			while( __sync_val_compare_and_swap(&peer_nodedesc->commit_ring, 0, loc_node + 1) );
+			if( __sync_val_compare_and_swap(&peer_nodedesc->commit_ring, 0, loc_node + 1) ) {
+				__semunlock(&pr->lock);
+				return;
+			}
 
 			// wait until commit done
-			while( peer_nodedesc->commit_ring );
+			while( peer_nodedesc->commit_ring ) {
+				__lfence();
+			}
+
+			pr->commited = true;
 		}
 		__semunlock(&pr->lock);
 	}
@@ -1628,6 +1636,9 @@ static uint8_t* allocring(int peer_node, int size8, int* sbit)
 		// map target nodes rings address space
 		init_ring(peer_node);
 		ring_buf = mca_btl_nc_component.peer_ring_buf[peer_node];
+		if( !ring_buf ) {
+			return 0;
+		}
 	}
 
 	static const int RING_GUARD = 8;
@@ -1805,7 +1816,7 @@ static void* sendthread(void* arg)
 	int locpeercnt = nodedesc->ndxmax;
 	place_helper();
 
-	// init node structure, done clear last structure member cpuindex
+	// init node structure, dont clear last structure member cpuindex
 	memset(nodedesc, 0, offsetof(node_t, ndxmax));
 	memset(mca_btl_nc_component.shm_base, 0, mca_btl_nc_component.ring_ofs);
 
@@ -1828,14 +1839,28 @@ static void* sendthread(void* arg)
 	bool* skip = (bool*)malloc(max_nodes * sizeof(bool));
 	volatile fifolist_t* list = mca_btl_nc_component.pending_sends;
 
+	// wait for first message
+	while( !list->head ) {
+		__lfence();
+		if( nodedesc->commit_ring ) {
+			// ring commit request
+			commit_ring(nodedesc->commit_ring - 1);
+			nodedesc->commit_ring = 0;
+		}
+	}
+
+	locpeercnt = nodedesc->ndxmax;
+	place_helper();
+
 	uint32_t id;
 	uint64_t t0 = rdtscp(&id);
 
 	while( nodedesc->active ) {
 
 		if( locpeercnt != nodedesc->ndxmax ) {
-			locpeercnt = nodedesc->ndxmax;
-			place_helper();
+			fprintf(stderr, "%d >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> peer count on node changed %d -> %d\n",
+				mca_btl_nc_component.group, locpeercnt, nodedesc->ndxmax);
+			fflush(stderr);
 		}
 
 		memset(skip, 0, max_nodes * sizeof(bool));
