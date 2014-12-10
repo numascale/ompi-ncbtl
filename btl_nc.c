@@ -1623,6 +1623,7 @@ static void init_ring(int peer_node)
 
 	mca_btl_nc_component.peer_ring_buf[peer_node] = 
 		ring_base + mca_btl_nc_component.ring_ofs + (loc_node * RING_SIZE);
+	__sfence();
 }
 
 
@@ -1839,18 +1840,19 @@ static void* sendthread(void* arg)
 	bool* skip = (bool*)malloc(max_nodes * sizeof(bool));
 	volatile fifolist_t* list = mca_btl_nc_component.pending_sends;
 
-	// wait for first message
-	while( !list->head ) {
-		__lfence();
-		if( nodedesc->commit_ring ) {
-			// ring commit request
-			commit_ring(nodedesc->commit_ring - 1);
-			nodedesc->commit_ring = 0;
-		}
-	}
+	//// wait for first message
+	//while( !list->head ) {
+	//	__lfence();
+	//	if( nodedesc->commit_ring ) {
+	//		// ring commit request
+	//		commit_ring(nodedesc->commit_ring - 1);
+	//		nodedesc->commit_ring = 0;
+	//		__sfence();
+	//	}
+	//}
 
-	locpeercnt = nodedesc->ndxmax;
-	place_helper();
+	//locpeercnt = nodedesc->ndxmax;
+	//place_helper();
 
 	uint32_t id;
 	uint64_t t0 = rdtscp(&id);
@@ -1858,9 +1860,11 @@ static void* sendthread(void* arg)
 	while( nodedesc->active ) {
 
 		if( locpeercnt != nodedesc->ndxmax ) {
-			fprintf(stderr, "%d >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> peer count on node changed %d -> %d\n",
-				mca_btl_nc_component.group, locpeercnt, nodedesc->ndxmax);
-			fflush(stderr);
+			//fprintf(stderr, "%d >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> peer count on node changed %d -> %d\n",
+			//	mca_btl_nc_component.group, locpeercnt, nodedesc->ndxmax);
+			//fflush(stderr);
+			locpeercnt = nodedesc->ndxmax;
+			place_helper();
 		}
 
 		memset(skip, 0, max_nodes * sizeof(bool));
@@ -1871,7 +1875,6 @@ static void* sendthread(void* arg)
 
 		// send all pending sends
 		while( frag ) {
-
 			frag_t* next = frag->next;
 			int peer_node = frag->node;
 
@@ -1925,6 +1928,7 @@ static void* sendthread(void* arg)
 				// ring commit request
 				commit_ring(nodedesc->commit_ring - 1);
 				nodedesc->commit_ring = 0;
+				__sfence();
 			}
 
 			//if( mca_btl_nc_component.group == 0 ) {
@@ -1954,6 +1958,7 @@ static void* sendthread(void* arg)
 			// ring commit request
 			commit_ring(nodedesc->commit_ring - 1);
 			nodedesc->commit_ring = 0;
+			__sfence();
 		}
 
 		if( idle && nodedesc->yieldcpu ) {
