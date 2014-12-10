@@ -1717,29 +1717,19 @@ static void* sendthread(void* arg)
 
 					lockedAdd(&(node->sendqcnt[frag->peer]), -1);
 
-					if( next ) {
-						if( prev ) {
-							prev->next = next;						
+					__semlock(&list->lock);
+					next = frag->next;
+					if( prev ) {
+						prev->next = next;
+
+						if( !next ) {
+							list->tail = prev;
 						}
-						else {
-							list->head = next;
-						}	
 					}
 					else {
-						__semlock(&list->lock);
-						next = frag->next;
-						if( prev ) {
-							prev->next = next;
-
-							if( !next ) {
-								list->tail = prev;
-							}
-						}
-						else {
-							list->head = next;
-						}
-						__semunlock(&list->lock);
+						list->head = next;
 					}
+					__semunlock(&list->lock);
 
 					freefrag(frag);
 				}
