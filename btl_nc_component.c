@@ -260,24 +260,61 @@ int mca_btl_nc_component_progress(void)
 		return 1;
 	}
 
-	uint64_t shmofs = mca_btl_nc_component.shm_ofs;
-	volatile ring_t* ring = mca_btl_nc_component.ring_desc;
 	node_t* nodedesc = mca_btl_nc_component.nodedesc;
-	int ring_cnt = nodedesc->ring_cnt;
+	ringlist_t* ringlist = &mca_btl_nc_component.ringlist;
 
-	for( int ringndx = 0; ringndx < ring_cnt; ringndx++ ) {
+	int ring_cnt = ringlist->cnt;
 
-		ring_t* ringnext = (ring_t*)(ring + 1);
-		__builtin_prefetch((void*)ringnext);
+	if( nodedesc->ring_cnt > ring_cnt ) {
+		for( int i = 0; i < MAX_GROUPS; i++ ) {
+			if( nodedesc->inuse[i] ) {
+
+				// check if ring is already in use
+				bool inuse = false;
+				ringdesc_t* r = ringlist->head;
+				while( r ) {
+					if( r->ndx == i ) {
+						inuse = true;
+						break;
+					}
+					r = r->next;
+				}
+
+				if( !inuse ) {
+					// prepend to ringlist
+					ringdesc_t* r = (ringdesc_t*)malloc(sizeof(ringdesc_t));
+					r->ring = mca_btl_nc_component.ring + i;
+					r->ringbuf = mca_btl_nc_component.shm_ringbase + (i * RING_SIZE);	
+					r->ndx = i;
+					r->prev = 0;
+
+					r->next = ringlist->head;
+					ringlist->head = r;
+
+					if( !r->next ) {
+						ringlist->tail = r;
+					}
+					++ringlist->cnt;
+				}
+			}
+		}
+	}
+
+	ringdesc_t* ringdesc = ringlist->head;
+
+	while( ringdesc ) {
+		__builtin_prefetch((void*)ringdesc->next);
+
+		ring_t* ring = ringdesc->ring;
 
 		if( !__semtrylock(&ring->lock) ) {
-			ring = ringnext;
+			ringdesc = ringdesc->next;
 			continue;
 		}
 
 		int sbit = ((ring->sbit) ^ 1);
 		uint32_t rtail = ring->tail;
-		rhdr_t* rhdr = (rhdr_t*)(ring->buf + shmofs + rtail);
+		rhdr_t* rhdr = (rhdr_t*)(ringdesc->ringbuf + rtail);
 
 		for( ; ; ) {
 
@@ -290,7 +327,8 @@ int mca_btl_nc_component_progress(void)
 				assert( z1 <= 3 ); // do 3 intermediate ring resets
 				if( (z1 > z0) && __sync_bool_compare_and_swap(&ring->ttail, z0, z1) ) {
 					// reset remote tail
-					uint32_t* ptail = ring->ptail + (uint64_t)mca_btl_nc_component.sysctxt;
+					// use one cache line per counter
+					uint32_t* ptail = mca_btl_nc_component.peer_stail[ringdesc->ndx] + mca_btl_nc_component.group; 
 					__nccopy4(ptail, rtail);
 				}
 				break;
@@ -331,7 +369,8 @@ int mca_btl_nc_component_progress(void)
 					done = true;
 				}
 				else {
-					frag = nodedesc->recvfrag[ringndx];
+					int ndx = ringdesc->ndx;
+					frag = nodedesc->recvfrag[ndx];
 
 					if( !frag ) {
 						int bufsize = sizeof(rhdr) + ((rhdr->sbits + 7) & ~7);
@@ -340,13 +379,13 @@ int mca_btl_nc_component_progress(void)
 						if( !frag ) {
 							return 0;
 						}
-						nodedesc->recvfrag[ringndx] = (void*)frag - shmofs;
+						nodedesc->recvfrag[ndx] = (void*)NODEADDR(frag);
 						frag->size = 0;
 					}
 					else {
-						frag = nodedesc->recvfrag[ringndx];
-						frag = (frag_t*)((void*)frag + shmofs);
+						frag = nodedesc->recvfrag[ndx];
 						assert( frag );
+						frag = (frag_t*)PROCADDR(frag);
 					}
 
 					void* dst = (void*)(frag + 1) + frag->size;
@@ -358,7 +397,7 @@ int mca_btl_nc_component_progress(void)
 
 					if( type == MSG_TYPE_BLKN ) {
 						frag->msgtype = MSG_TYPE_FRAG;
-						nodedesc->recvfrag[ringndx] = 0;
+						nodedesc->recvfrag[ndx] = 0;
 						done = true;
 					}
 				}
@@ -375,7 +414,6 @@ int mca_btl_nc_component_progress(void)
 					}
 					break;
 				}
-
 				rhdr = (rhdr_t*)((uint8_t*)rhdr + rsize);			
 			}
 			else {
@@ -385,11 +423,12 @@ int mca_btl_nc_component_progress(void)
 				if( n > 0 ) {
 					memset8((uint8_t*)rhdr, sbit, n);
 				}
-				uint32_t* ptail = ring->ptail + (uint64_t)mca_btl_nc_component.sysctxt;
+				// use one cache line per counter
+				uint32_t* ptail = mca_btl_nc_component.peer_stail[ringdesc->ndx] + mca_btl_nc_component.group;
 				__nccopy4(ptail, 0);
 
 				rtail = 0;
-				rhdr = (rhdr_t*)(ring->buf + shmofs);
+				rhdr = (rhdr_t*)(ringdesc->ringbuf);
 				ring->ttail = 0;
 				ring->sbit = sbit;
 				sbit ^= 1;
@@ -403,7 +442,7 @@ int mca_btl_nc_component_progress(void)
 			break;
 		}
 
-		ring = ringnext;
+		ringdesc = ringdesc->next;
 	}
 
 	if( list->head ) {

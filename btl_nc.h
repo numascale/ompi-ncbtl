@@ -55,7 +55,8 @@ BEGIN_C_DECLS
 
 #define NC_CLSIZE (64)    // cache line size
 
-#define MAX_PROCS 1024
+#define MAX_GROUPS 720
+#define MAX_PROCS 4096
 #define MAX_PROCS_PER_NODE 32
 
 #define MAX_EAGER_SIZE (4 * 1024)
@@ -247,51 +248,61 @@ struct msgstats_t {
 };
 
 
-typedef struct {
-	volatile int32_t lock;
+typedef struct ring {
+	volatile int32_t lock ALIGN8;
 	uint32_t tail;  // read tail
 	int32_t  sbit;  // sync bit
 	int32_t  ttail; // ring reset flag
-	uint8_t* buf;   // pointer to ring buffer
-	void*    ptail; // pointer to remote send tail
 } ring_t;
 
 
+typedef struct ringdesc {
+	ring_t*          ring;			
+	void*  	         ringbuf;
+	int32_t          ndx;
+	struct ringdesc* prev;
+	struct ringdesc* next;
+} ringdesc_t;
+
+
+typedef struct ringlist {
+	int32_t     cnt;
+	ringdesc_t* head;			
+	ringdesc_t* tail;
+} ringlist_t;
+
+
 typedef struct {
+	volatile int32_t lock ALIGN8;
 	bool     commited;
-	volatile int32_t lock;
 	uint32_t head;
 	int32_t  sbit;
 } pring_t;
 
 
 typedef struct {
+	uint32_t         stail[MAX_GROUPS];
 	volatile bool    active;
+	int32_t          cpuid;
 	bool             yieldcpu;
 	void*            shm_base;
-	int32_t          ring_cnt;
-	volatile int32_t commit_ring ALIGN8;
-	volatile int32_t fraglock;
 	void*	         shm_frags;		// base of frags in shared mem
+	volatile int32_t fraglock ALIGN8;
 	frag_t*          recvfrag[MAX_PROCS_PER_NODE];
 	int32_t*         sendqcnt;
+	int32_t          ring_cnt;
+	bool             inuse[MAX_GROUPS];
 	// !must be last member
 	int32_t          ndxmax ALIGN8;	// max peer index on local node
 } node_t;
 
 
 typedef struct {
-	volatile int32_t lock;
+	volatile int32_t lock ALIGN8;
 	int      readycnt;
 	int      max_nodes;
 	int      node_count;
 	int      rank_count;
-//uint32_t msgcnt0;
-//uint32_t msgcnt1;
-//uint32_t msgcnt2;
-//uint32_t msgcnt3;
-//uint32_t msgcnt4;
-//uint32_t msgcnt5;
 	uint32_t map[MAX_PROCS]; // (group | cpuindex)
 	uint32_t cpuid[MAX_PROCS];
 } sysctxt_t;
@@ -332,9 +343,10 @@ struct mca_btl_nc_component_t {
 	uint64_t   ring_ofs;
 	uint64_t   frag_ofs;
 
-	ring_t*    ring_desc;
-	pring_t*   peer_ring_desc;
+	ring_t*    ring;
+	pring_t*   peer_ring;
 	void**     peer_ring_buf;
+	ringlist_t ringlist;
 
     int32_t    num_smp_procs;		// current number of smp procs on this host
     int32_t    my_smp_rank;			// My SMP process rank.  Used for accessing
