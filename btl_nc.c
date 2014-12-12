@@ -368,11 +368,12 @@ CLEANUP:
 static int group_of_cpu(int cpuid)
 {
 	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
+	int max_cpus = numa_num_configured_cpus();
 	int numanode = numa_node_of_cpu(cpuid);
 	int group = -1;
 	int mindist = INT_MAX;
 
-	for( int i = 0; i < MAX_PROCS; i++ ) {
+	for( int i = 0; i < max_cpus; i++ ) {
 		int cid = sysctxt->cpuid[i] - 1;
 		if( (cid >= 0) && (cid != cpuid) ) {
 			int peer_numanode = numa_node_of_cpu(cid);
@@ -390,11 +391,34 @@ static int group_of_cpu(int cpuid)
 }
 
 
+static int boardcount()
+{
+	int max_nodes = numa_num_configured_nodes();
+
+	int m = 0;
+
+	for( int i = 0; i < max_nodes; i++ ) {
+		int n = 0;
+		for( int j = 0; j < max_nodes; j++ ) {
+			int dist = numa_distance(i, j);
+			if( dist <= INTRA_NODE_DIST_MAX ) {
+				++n;
+			}
+		}
+		n = max_nodes / n;
+		if( n > m ) {
+			m = n;
+		}
+	}
+	return m;
+}
+
+
 static int add_to_group()
 {
     size_t pagesize = sysconf(_SC_PAGESIZE);
 	int max_nodes = numa_num_configured_nodes();
-max_nodes = 32;
+	int max_cpus = numa_num_configured_cpus();
 
 	size_t noderecsize = ((sizeof(node_t) + pagesize - 1) & ~(pagesize - 1));
 	size_t syssize = ((sizeof(sysctxt_t) + pagesize - 1) & ~(pagesize - 1));
@@ -418,7 +442,7 @@ max_nodes = 32;
 	int mindist = INT_MAX;
 	int node = 0;
 
-	for( int i = 0; i < MAX_PROCS; i++ ) {
+	for( int i = 0; i < max_cpus; i++ ) {
 		int cid = sysctxt->cpuid[i] - 1;
 		if( (cid >= 0) && (cid != cpuid) ) {
 			int peer_numanode = numa_node_of_cpu(cid);
@@ -570,7 +594,14 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 								+ max_nodes * sizeof(ring_t)
 								+ max_nodes * sizeof(pring_t)
 								+ sizeof(fifolist_t);
-								
+
+    ev = getenv("NC_PRESET_MEM");
+    mca_btl_nc_component.preset_mem = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
+	if( mca_btl_nc_component.group == 0 ) {
+		fprintf(stderr, "PRESET MEMORY = %s\n", mca_btl_nc_component.preset_mem ? "YES" : "NO");
+		fflush(stderr);
+	}
+
 	if( cpuindex == 0 ) {	
 		pthread_create(&mca_btl_nc_component.sendthread, 0, &send_thread, 0);
 	}
@@ -1807,13 +1838,6 @@ static void* send_thread(void* arg)
 	frag->prevsize = 0;
 	frag->fsize = MAX_SIZE_FRAGS;
 	frag->lastfrag = true;
-
-    char* ev = getenv("NC_PRESET_MEM");
-    mca_btl_nc_component.preset_mem = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
-	if( mca_btl_nc_component.group == 0 ) {
-		fprintf(stderr, "PRESET MEMORY = %s\n", mca_btl_nc_component.preset_mem ? "YES" : "NO");
-		fflush(stderr);
-	}
 
 	if( mca_btl_nc_component.preset_mem ) {
 		for( int i = 0; i < sysctxt->max_nodes; i++ ) {
