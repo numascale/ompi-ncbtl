@@ -1576,10 +1576,12 @@ static void init_ring(int peer_node)
 			node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
 			assert( (((uint64_t)peer_nodedesc) & 4095) == 0 );
 			
-			bind_cpu(peer_nodedesc->cpuid);
+			if( !mca_btl_nc_component.preset_mem ) {
+				bind_cpu(peer_nodedesc->cpuid);
 		
-			memclear(ring_addr, RING_SIZE);
-			
+				memclear(ring_addr, RING_SIZE);
+			}
+
 			peer_nodedesc->inuse[loc_node] = true;
 			__sfence();
 			pr->commited = true;
@@ -1587,8 +1589,9 @@ static void init_ring(int peer_node)
 
 			lockedAdd(&peer_nodedesc->ring_cnt, 1);
 			
-			bind_cpu(cpuid);
-
+			if( mca_btl_nc_component.preset_mem ) {
+				bind_cpu(cpuid);
+			}
 //int n = getnode(ring_addr);
 
 		}
@@ -1805,10 +1808,19 @@ static void* send_thread(void* arg)
 	frag->fsize = MAX_SIZE_FRAGS;
 	frag->lastfrag = true;
 
-	//for( int i = 0; i < 26; i++ ) {
-	//	memset8(mca_btl_nc_component.shm_ringbase, 0, 26 * RING_SIZE);
-	//	__sfence();
-	//}
+    char* ev = getenv("NC_PRESET_MEM");
+    mca_btl_nc_component.preset_mem = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
+	if( mca_btl_nc_component.group == 0 ) {
+		fprintf(stderr, "PRESET MEMORY = %s\n", mca_btl_nc_component.preset_mem ? "YES" : "NO");
+		fflush(stderr);
+	}
+
+	if( mca_btl_nc_component.preset_mem ) {
+		for( int i = 0; i < sysctxt->max_nodes; i++ ) {
+			memset8(mca_btl_nc_component.shm_ringbase, 0, sysctxt->max_nodes * RING_SIZE);
+			__sfence();
+		}
+	}
 
 	volatile fifolist_t* list = mca_btl_nc_component.pending_sends;
 

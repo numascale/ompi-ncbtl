@@ -317,6 +317,7 @@ struct mca_btl_nc_component_t {
 	int32_t    group;
 	int32_t    cpuindex;
 	int        statistics;			// create statistics
+	bool       preset_mem;
 	uint8_t*   shm_stat;			// statistics buffer
 	fifolist_t* pending_sends;
 
