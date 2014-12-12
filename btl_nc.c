@@ -56,6 +56,7 @@
 #include "numa.h"
 #include "numaif.h"
 
+#define MPOL_BIND 2		// mbind memory binding policy
 
 
 static void* send_thread(void* arg);
@@ -562,6 +563,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 	// map local mem
 	void* shmbase = map_shm(node, shmsize);
 	assert( shmbase );
+
 	mca_btl_nc_component.shmsize = shmsize;
 	mca_btl_nc_component.shm_base = shmbase;
 	mca_btl_nc_component.ring_ofs = ring_ofs;
@@ -597,10 +599,6 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 
     ev = getenv("NC_PRESET_MEM");
     mca_btl_nc_component.preset_mem = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
-	if( mca_btl_nc_component.group == 0 ) {
-		fprintf(stderr, "PRESET MEMORY = %s\n", mca_btl_nc_component.preset_mem ? "YES" : "NO");
-		fflush(stderr);
-	}
 
 	if( cpuindex == 0 ) {	
 		pthread_create(&mca_btl_nc_component.sendthread, 0, &send_thread, 0);
@@ -611,7 +609,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 
 	// offset for local processes to local fragments
 	mca_btl_nc_component.shm_ofs = shmbase - nodedesc->shm_base;
-if( MY_RANK == 0 ) {
+/*
 	int32_t readycnt = lockedAdd(&sysctxt->readycnt, 1);
 
 	fprintf(stderr, "READY %d, RANK %d, TOTAL %d, PID %d, GROUP %d, CPUID %d, CPU INDEX %d, SHMSIZE %d MB\n", 
@@ -625,8 +623,7 @@ if( MY_RANK == 0 ) {
 		(int)(shmsize >> 20));
 	fflush(stderr);
 }
-	// -------------------------------------------------------------------
-
+*/
     ev = getenv("NCSTAT");
     mca_btl_nc_component.statistics = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
     if( mca_btl_nc_component.statistics ) {
@@ -1583,33 +1580,27 @@ static void memclear(void* to, int n)
 	    : : "r" (n), "r" (to) : "rax", "ecx", "rdi", "memory");
 }
 
+
 static void init_ring(int peer_node)
 {
 	int loc_node = mca_btl_nc_component.group;
-
 	assert( peer_node != loc_node );
 
 	void* ring_addr = map_shm(peer_node, mca_btl_nc_component.shmsize);
 	assert( ring_addr );
 	ring_addr += mca_btl_nc_component.ring_ofs + (loc_node * RING_SIZE);
 
-	// pr->buf is pointer to remote ring, address is based on mapping for local nodes process
 	volatile pring_t* pr = mca_btl_nc_component.peer_ring + peer_node;
-
 	if( !pr->commited ) {
 
 		__semlock(&pr->lock);
 
 		if( !pr->commited ) {
-			// commit rings address space
-
-			int cpuid = currCPU();
-
 			node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
 			assert( (((uint64_t)peer_nodedesc) & 4095) == 0 );
 			
 			if( !mca_btl_nc_component.preset_mem ) {
-				bind_cpu(peer_nodedesc->cpuid);		
+				// commit rings address space
 				memclear(ring_addr, RING_SIZE);
 			}
 
@@ -1618,13 +1609,7 @@ static void init_ring(int peer_node)
 			pr->commited = true;
 			__sfence();
 
-			lockedAdd(&peer_nodedesc->ring_cnt, 1);
-			
-			if( !mca_btl_nc_component.preset_mem ) {
-				bind_cpu(cpuid);
-			}
-//int n = getnode(ring_addr);
-
+			lockedAdd(&peer_nodedesc->ring_cnt, 1);		
 		}
 		__semunlock(&pr->lock);
 	}
@@ -1807,27 +1792,57 @@ static void place_helper()
 	mca_btl_nc_component.nodedesc->yieldcpu = (cpuid < 0);
 
 	if( cpuid >= 0 ) {
-//fprintf(stderr, "GROUP %d, SEND_THREAD CPUID=%d\n", group, cpuid);
-//fflush(stderr);
 		bind_cpu(cpuid); 
 		mca_btl_nc_component.nodedesc->cpuid = cpuid;
 	}
 }
 
 
+static void ringbind()
+{
+	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
+	int max_nodes = sysctxt->max_nodes;
+
+	// bind all ring address space to local node
+	// it will be commited from remote
+	int target_node = currNumaNode();
+
+	struct bitmask* mask = numa_allocate_nodemask();
+	numa_bitmask_clearall(mask);
+	numa_bitmask_setbit(mask, target_node);
+
+	void* rings = mca_btl_nc_component.shm_base + mca_btl_nc_component.ring_ofs;
+	int rc = syscall(__NR_mbind, (long)rings, max_nodes * RING_SIZE, MPOL_BIND, (long)mask->maskp, mask->size, 0);
+	assert( rc >= 0 );
+	if( rc < 0 ) {
+		fprintf(stderr, "WARNING : MBIND FAILED...\n");
+		fflush(stderr);
+	}
+
+	numa_bitmask_free(mask);
+}
+
+
 static void* send_thread(void* arg)
 {
+	if( mca_btl_nc_component.group == 0 ) {
+		fprintf(stderr, "PRESET MEMORY = %s\n", mca_btl_nc_component.preset_mem ? "YES" : "NO");
+		fflush(stderr);
+	}
+
 	node_t* nodedesc = mca_btl_nc_component.nodedesc;
 
 	int locpeercnt = nodedesc->ndxmax;
 	place_helper();
 
+	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
+	int max_nodes = sysctxt->max_nodes;
+
 	// init node structure, dont clear last structure member cpuindex
 	memset(nodedesc, 0, offsetof(node_t, ndxmax));
 	memset(mca_btl_nc_component.shm_base, 0, mca_btl_nc_component.ring_ofs);
 
-	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
-	int max_nodes = sysctxt->max_nodes;
+	ringbind();
 
 	nodedesc->shm_base = mca_btl_nc_component.shm_base;
 	nodedesc->sendqcnt = mca_btl_nc_component.sendqcnt;
