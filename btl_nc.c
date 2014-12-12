@@ -394,6 +394,7 @@ static int add_to_group()
 {
     size_t pagesize = sysconf(_SC_PAGESIZE);
 	int max_nodes = numa_num_configured_nodes();
+max_nodes = 32;
 
 	size_t noderecsize = ((sizeof(node_t) + pagesize - 1) & ~(pagesize - 1));
 	size_t syssize = ((sizeof(sysctxt_t) + pagesize - 1) & ~(pagesize - 1));
@@ -1577,8 +1578,7 @@ static void init_ring(int peer_node)
 			assert( (((uint64_t)peer_nodedesc) & 4095) == 0 );
 			
 			if( !mca_btl_nc_component.preset_mem ) {
-				bind_cpu(peer_nodedesc->cpuid);
-		
+				bind_cpu(peer_nodedesc->cpuid);		
 				memclear(ring_addr, RING_SIZE);
 			}
 
@@ -1589,7 +1589,7 @@ static void init_ring(int peer_node)
 
 			lockedAdd(&peer_nodedesc->ring_cnt, 1);
 			
-			if( mca_btl_nc_component.preset_mem ) {
+			if( !mca_btl_nc_component.preset_mem ) {
 				bind_cpu(cpuid);
 			}
 //int n = getnode(ring_addr);
@@ -1828,6 +1828,8 @@ static void* send_thread(void* arg)
 	__sfence();
 
 	bool* skip = (bool*)malloc(max_nodes * sizeof(bool));
+	locpeercnt = nodedesc->ndxmax;
+	place_helper();
 
 	while( nodedesc->active ) {
 
