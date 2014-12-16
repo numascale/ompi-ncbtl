@@ -65,13 +65,13 @@ static int nc_register(void);
 static void processmsg(int type, const void* src, int size);
 static void sbitreset(void* dst, const void* sbits, const void* src, int size8, int sbit);
 static void memcpy8(void* to, const void* from, int n);
+static void memset8(void* to, uint64_t val, int n);
 static mca_btl_base_module_t** mca_btl_nc_component_init(
     int *num_btls,
     bool enable_progress_threads,
     bool enable_mpi_threads
 );
 
-void memset8(void* to, uint64_t val, int n);
 void sendack(int peer, void* hdr);
 frag_t* allocfrag(int size);
 void freefrag(frag_t* frag);
@@ -226,7 +226,6 @@ static void fifo_push_back(fifolist_t* list, frag_t* frag)
 static void processlist()
 {
 	fifolist_t* list = mca_btl_nc_component.myinq;
-
 	assert( list->head );
 
 	frag_t* frag = list->head;
@@ -609,7 +608,7 @@ static void memcpy8(void* to, const void* from, int n)
 }
 
 
-void memset8(void* to, uint64_t val, int n)
+static void memset8(void* to, uint64_t val, int n)
 {
     assert( n > 0 );
 	assert( (n & 0x7) == 0 );
@@ -621,8 +620,9 @@ void memset8(void* to, uint64_t val, int n)
 		"movq %1, %%rax\n"
 		"movq %2, %%rdi\n"
 		"1:\n"
-		"movq %%rax, (%%rdi)\n"
+		"movnti %%rax, (%%rdi)\n"
 		"addq $8, %%rdi\n" 
 		"loop 1b\n"
+		"sfence\n"
 	    : : "r" (n), "r" (val), "r" (to) : "ecx", "rax", "rdi", "memory");
 }

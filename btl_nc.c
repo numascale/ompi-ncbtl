@@ -73,11 +73,9 @@ static uint8_t* allocring(int peer_node, int size8, int* sbit);
 static bool send_msg(frag_t* frag);
 static void fifo_push_back(fifolist_t* list, frag_t* frag);
 
-void memset8(void* to, uint64_t val, int n);
 frag_t* allocfrag(int size);
 void freefrag(frag_t* frag);
 void INThandler(int sig);
-void INThandler11(int sig);
 
 
 static void bind_cpu(int id) {
@@ -115,15 +113,6 @@ void INThandler(int sig)
 	print_stat();
 
 	signal(SIGUSR1, INThandler);
-}
-
-
-void INThandler11(int sig) 
-{
-	signal(sig, SIG_IGN);
-	//fprintf(stderr, "%d ##################CRASH %d %d %d\n", MY_RANK,
-	//	mca_btl_nc_component.__pos0, mca_btl_nc_component.__pos1, mca_btl_nc_component.__pos2);
-	//fflush(stderr);
 }
 
 
@@ -366,60 +355,18 @@ CLEANUP:
 }
 
 
-static int group_of_cpu(int cpuid)
+static int numa_dist(int i, int j)
 {
 	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
-	int max_cpus = numa_num_configured_cpus();
-	int numanode = numa_node_of_cpu(cpuid);
-	int group = -1;
-	int mindist = INT_MAX;
-
-	for( int i = 0; i < max_cpus; i++ ) {
-		int cid = sysctxt->cpuid[i] - 1;
-		if( (cid >= 0) && (cid != cpuid) ) {
-			int peer_numanode = numa_node_of_cpu(cid);
-			int dist = numa_distance(numanode, peer_numanode);
-			if( dist < mindist ) {
-				mindist = dist;
-				group = (sysctxt->map[i] >> 16);
-			}
-		}
-	}
-	if( mindist > INTRA_NODE_DIST_MAX ) {
-		group = -1;
-	}
-	return group;
-}
-
-
-static int boardcount()
-{
-	int max_nodes = numa_num_configured_nodes();
-
-	int m = 0;
-
-	for( int i = 0; i < max_nodes; i++ ) {
-		int n = 0;
-		for( int j = 0; j < max_nodes; j++ ) {
-			int dist = numa_distance(i, j);
-			if( dist <= INTRA_NODE_DIST_MAX ) {
-				++n;
-			}
-		}
-		n = max_nodes / n;
-		if( n > m ) {
-			m = n;
-		}
-	}
-	return m;
+	return sysctxt->numadist[i * sysctxt->max_nodes + j];
 }
 
 
 static int add_to_group()
 {
     size_t pagesize = sysconf(_SC_PAGESIZE);
-	int max_nodes = numa_num_configured_nodes();
 	int max_cpus = numa_num_configured_cpus();
+	int max_nodes = numa_num_configured_nodes();
 
 	size_t noderecsize = ((sizeof(node_t) + pagesize - 1) & ~(pagesize - 1));
 	size_t syssize = ((sizeof(sysctxt_t) + pagesize - 1) & ~(pagesize - 1));
@@ -433,43 +380,55 @@ static int add_to_group()
 	sysctxt->max_nodes = max_nodes;
 
 	int cpuid = currCPU();
-	int numanode = currNumaNode();
+	sysctxt->cpuid[MY_RANK] = cpuid + 1;
+	int currnode = currNumaNode();
+
+	void* nodedesc0 = (void*)sysctxt + syssize;
+	int32_t* numadist = sysctxt->numadist;
+	int32_t* numanode = sysctxt->numanode;
 
 	__semlock(&sysctxt->lock);
 
 	int rank_count = ++sysctxt->rank_count;
-	sysctxt->cpuid[MY_RANK] = cpuid + 1;
 
-	int mindist = INT_MAX;
-	int node = 0;
-
-	for( int i = 0; i < max_cpus; i++ ) {
-		int cid = sysctxt->cpuid[i] - 1;
-		if( (cid >= 0) && (cid != cpuid) ) {
-			int peer_numanode = numa_node_of_cpu(cid);
-			int dist = numa_distance(numanode, peer_numanode);
-			if( dist < mindist ) {
-				mindist = dist;
-				node = (sysctxt->map[i] >> 16);
-
+    if( numadist[0] == 0 ) {
+		// cache numa info
+		for( int i = 0; i < max_nodes; i++ ) {
+			for( int j = 0; j < max_nodes; j++ ) {
+ 	       		numadist[i * max_nodes + j] = numa_distance(i, j);
 			}
+		}    	
+
+		for( int i = 0; i < max_cpus; i++ ) {
+			numanode[i] = numa_node_of_cpu(i);
 		}
 	}
 
-	if( mindist > INTRA_NODE_DIST_MAX ) {
-		node = sysctxt->node_count;
-		++sysctxt->node_count;
+	int group = -1;
+
+	for( int i = 0; i < max_nodes; i++ ) {
+		if( numadist[currnode * max_nodes + i] < INTRA_NODE_DIST_MAX ) {
+			if( sysctxt->group[i] - 1 >= 0 ) {
+				group = sysctxt->group[i] - 1;
+				break;
+			}		
+		}
+	}
+	if( group < 0 ) {
+		group = sysctxt->node_count++;
+		sysctxt->group[currnode] = group + 1;
 	}
 
-	void* nodedesc0 = (void*)sysctxt + syssize;
-	node_t* nodedesc = (node_t*)(nodedesc0 + node * noderecsize);
-
+	node_t* nodedesc = (node_t*)(nodedesc0 + group * noderecsize);
 	int32_t cpuindex = nodedesc->ndxmax++;
-	sysctxt->map[MY_RANK] = ((((uint32_t)node) << 16) | cpuindex);
 
 	__semunlock(&sysctxt->lock);
 
-	return node;
+	mca_btl_nc_component.group = group;
+	mca_btl_nc_component.cpuindex = cpuindex;	
+	sysctxt->map[MY_RANK] = ((((uint32_t)group) << 16) | cpuindex);
+
+	return group;
 }
 
 
@@ -478,8 +437,8 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 	assert( sizeof(frag_t) == FRAG_SIZE );
 
     size_t pagesize = sysconf(_SC_PAGESIZE);
-	int max_nodes = numa_num_configured_nodes();
 	int max_cpus = numa_num_configured_cpus();
+	int max_nodes = numa_num_configured_nodes();
 
     char* ev = getenv("NC_GROUP_NUMA_DIST");
 	int grp_numa_dist = 16;
@@ -503,12 +462,8 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 	}
 
 	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
+	sysctxt->num_smp_procs = n;
 	mca_btl_nc_component.map = sysctxt->map;
-
-	int id = mca_btl_nc_component.map[MY_RANK];
-
-	mca_btl_nc_component.cpuindex = (id & 0xffff);	
-	mca_btl_nc_component.group = (id >> 16);	
 
 	int cpuindex = mca_btl_nc_component.cpuindex;
 
@@ -547,7 +502,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 	shmsize = max_nodes * sizeof(ring_t);
 	shmsize += max_nodes * sizeof(pring_t);
 	shmsize += sizeof(fifolist_t);
-	shmsize += n * sizeof(int32_t);	
+	shmsize += n * 16 * sizeof(int32_t);	
 	shmsize += max_nodes * sizeof(fifolist_t);
 	shmsize = (shmsize + pagesize - 1) & ~(pagesize - 1);
 
@@ -588,7 +543,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 								+ max_nodes * sizeof(ring_t)
 								+ max_nodes * sizeof(pring_t)
 								+ sizeof(fifolist_t)
-								+ n * sizeof(int32_t);
+								+ n * 16 * sizeof(int32_t);
 
 	mca_btl_nc_component.myinq = mca_btl_nc_component.inq + cpuindex;
 
@@ -596,9 +551,6 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 								+ max_nodes * sizeof(ring_t)
 								+ max_nodes * sizeof(pring_t)
 								+ sizeof(fifolist_t);
-
-    ev = getenv("NC_PRESET_MEM");
-    mca_btl_nc_component.preset_mem = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
 
 	if( cpuindex == 0 ) {	
 		pthread_create(&mca_btl_nc_component.sendthread, 0, &send_thread, 0);
@@ -1033,8 +985,8 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 	int rsize = sizeof(rhdr_t) + size8;
 
     // if there are already pending sends to peer, this message must be queued also
-    bool queued = (bool)mca_btl_nc_component.sendqcnt[peer];
-	
+    bool queued = (bool)mca_btl_nc_component.sendqcnt[peer << 4];
+
     int sbit;
     uint8_t* rbuf;
     frag_t* frag;
@@ -1093,7 +1045,7 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 	    frag->msgtype = MSG_TYPE_ISEND;
 		frag->peer = peer;
 
-		lockedAdd(&mca_btl_nc_component.sendqcnt[peer], 1);
+		lockedAdd(&mca_btl_nc_component.sendqcnt[peer << 4], 1);
 
 		fifo_push_back(mca_btl_nc_component.pending_sends, frag);
 		return OMPI_SUCCESS;
@@ -1246,7 +1198,7 @@ int mca_btl_nc_send( struct mca_btl_base_module_t* btl,
 		rhdr->type = MSG_TYPE_FRAG;
 		rhdr->dst_ndx = (dst & 0xffff);
 
-		lockedAdd(&mca_btl_nc_component.sendqcnt[peer], 1);
+		lockedAdd(&mca_btl_nc_component.sendqcnt[peer << 4], 1);
 
 		fifo_push_back(mca_btl_nc_component.pending_sends, frag);
 	}
@@ -1392,7 +1344,7 @@ void sendack(int peer, void* hdr)
 		frag->rsize = rsize;
 	    frag->msgtype = MSG_TYPE_ACK;
 
-		lockedAdd(&mca_btl_nc_component.sendqcnt[peer], 1);
+		lockedAdd(&mca_btl_nc_component.sendqcnt[peer << 4], 1);
 
 		fifolist_t* list = mca_btl_nc_component.pending_sends;
 		fifo_push_back(list, frag);
@@ -1479,17 +1431,14 @@ frag_t* allocfrag(int size)
 
 		frag_t* next = (frag_t*)((uint8_t*)frag + size);
 
-		if( frag->lastfrag ) {
-			next->lastfrag = true;
-		}
-		else {
+		if( !frag->lastfrag ) {
 			frag_t* nx = (frag_t*)((uint8_t*)frag + frag->fsize);
 			nx->prevsize = rest;
-			next->lastfrag = false;
 		}
 
 		next->fsize = rest;
 		next->inuse = false;
+		next->lastfrag = frag->lastfrag;
 		next->prevsize = size;
 
 		frag->lastfrag = false;
@@ -1562,24 +1511,6 @@ static void fifo_push_back(fifolist_t* list, frag_t* frag)
 	__semunlock(&list->lock);
 }
 
-static void memclear(void* to, int n)
-{
-    assert( n > 0 );
-	assert( (n & 0x7) == 0 );
-	assert( (((uint64_t)to) & 0x7) == 0 );
-
-	__asm__ __volatile__ (
-		"movl %0, %%ecx\n"
-		"shr  $3, %%ecx\n"
-		"movq %1, %%rdi\n"
-		"movq $0, %%rax\n"
-		"1:\n"
-		"movnti %%rax, (%%rdi)\n"
-		"addq $8, %%rdi\n" 
-		"loop 1b\n"		
-	    : : "r" (n), "r" (to) : "rax", "ecx", "rdi", "memory");
-}
-
 
 static void init_ring(int peer_node)
 {
@@ -1599,13 +1530,7 @@ static void init_ring(int peer_node)
 			node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
 			assert( (((uint64_t)peer_nodedesc) & 4095) == 0 );
 			
-			if( !mca_btl_nc_component.preset_mem ) {
-				// commit rings address space
-				memclear(ring_addr, RING_SIZE);
-			}
-
-			peer_nodedesc->inuse[loc_node] = true;
-			__sfence();
+			lockedAdd((int32_t*)&(peer_nodedesc->inuse[loc_node]), 1);		
 			pr->commited = true;
 			__sfence();
 
@@ -1764,36 +1689,53 @@ static void sbitset(void* sbits, void* data, int size8, int sbit)
 static void place_helper()
 {
 	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
-	int n = sysctxt->rank_count;
+	int max_cpus = numa_num_configured_cpus();
 	int group = mca_btl_nc_component.group;
+	int rank_count = sysctxt->rank_count;
+	int numanode = currNumaNode();
+	int32_t* nodetab = sysctxt->numanode;
 	int cpu0 = currCPU();
 
 	int cpuid = -1;
-	for( int id = 0; id < numa_num_configured_cpus(); id++ ) {
+	int c = cpu0;
+	int d = 1;
+	int s = 1;
+//cpuid = (cpu0 / 12) * 12;
 
-		if( group_of_cpu(id) != group ) {
-			continue;
-		}
+	while( d < 32 ) {
+		c += s * d;
+		s *= -1;
+		++d;
+	
+		if( c >= 0 && c < max_cpus ) {
+			if( numa_dist(nodetab[c], numanode) < INTRA_NODE_DIST_MAX ) {
 
-		bool used = false;
-		for( int j = 0; j < n; j++ ) {
-			if( sysctxt->cpuid[j] - 1 == id ) {
-				used = true;
-				break;
-			}
-		}
-
-		if( !used ) {
-			cpuid = id;
-			break;
+				bool used = false;
+				for( int i = 0; i < rank_count; i++ ) {
+					if( sysctxt->cpuid[i] - 1 == c ) {
+						used = true;
+						break;
+					}
+				}
+				if( !used ) {
+					cpuid = c;
+					break;
+				}
+			}		
 		}
 	}
 
 	mca_btl_nc_component.nodedesc->yieldcpu = (cpuid < 0);
+	if( cpuid < 0 ) {
+		fprintf(stderr, "%d WARNING CPU YIELD\n", group);
+		fflush(stderr);
+	}
 
 	if( cpuid >= 0 ) {
 		bind_cpu(cpuid); 
 		mca_btl_nc_component.nodedesc->cpuid = cpuid;
+//fprintf(stderr, "%d >>>>>>>>>>>>>>>>>>> cpuid %d -> %d\n", mca_btl_nc_component.group, cpu0, cpuid);
+//fflush(stderr);
 	}
 }
 
@@ -1823,29 +1765,44 @@ static void ringbind()
 }
 
 
+static void memclear(void* to, int n)
+{
+    assert( n > 0 );
+	assert( (n & 0x7) == 0 );
+	assert( (((uint64_t)to) & 0x7) == 0 );
+
+	__asm__ __volatile__ (
+		"movl %0, %%ecx\n"
+		"shr  $3, %%ecx\n"
+		"movq %1, %%rdi\n"
+		"movq $0, %%rax\n"
+		"1:\n"
+		"movnti %%rax, (%%rdi)\n"
+		"addq $8, %%rdi\n" 
+		"loop 1b\n"		
+	    : : "r" (n), "r" (to) : "rax", "ecx", "rdi", "memory");
+}
+
+
 static void* send_thread(void* arg)
 {
-	if( mca_btl_nc_component.group == 0 ) {
-		fprintf(stderr, "PRESET MEMORY = %s\n", mca_btl_nc_component.preset_mem ? "YES" : "NO");
-		fflush(stderr);
-	}
-
 	node_t* nodedesc = mca_btl_nc_component.nodedesc;
 
-	int locpeercnt = nodedesc->ndxmax;
-	place_helper();
-
-	sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
+	volatile sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
 	int max_nodes = sysctxt->max_nodes;
 
-	// init node structure, dont clear last structure member cpuindex
-	memset(nodedesc, 0, offsetof(node_t, ndxmax));
-	memset(mca_btl_nc_component.shm_base, 0, mca_btl_nc_component.ring_ofs);
+   	// init node structure, dont clear last structure member cpuindex
+    memset(nodedesc, 0, offsetof(node_t, ndxmax));
+    memset(mca_btl_nc_component.shm_base, 0, mca_btl_nc_component.ring_ofs);
 
 	ringbind();
+//	void* rings = mca_btl_nc_component.shm_base + mca_btl_nc_component.ring_ofs;
+//	memset(rings, 0, max_nodes * RING_SIZE);
+//	memclear(rings, max_nodes * RING_SIZE);
 
 	nodedesc->shm_base = mca_btl_nc_component.shm_base;
 	nodedesc->sendqcnt = mca_btl_nc_component.sendqcnt;
+	int32_t* sendqcnt = nodedesc->sendqcnt;
 
 	nodedesc->shm_frags = nodedesc->shm_base + mca_btl_nc_component.frag_ofs;
 	frag_t* frag = (frag_t*)nodedesc->shm_frags;
@@ -1854,28 +1811,24 @@ static void* send_thread(void* arg)
 	frag->fsize = MAX_SIZE_FRAGS;
 	frag->lastfrag = true;
 
-	if( mca_btl_nc_component.preset_mem ) {
-		for( int i = 0; i < sysctxt->max_nodes; i++ ) {
-			memset8(mca_btl_nc_component.shm_ringbase, 0, sysctxt->max_nodes * RING_SIZE);
-			__sfence();
-		}
-	}
-
 	volatile fifolist_t* list = mca_btl_nc_component.pending_sends;
+
+	while( sysctxt->rank_count < sysctxt->num_smp_procs );
+
+	int	locpeercnt = 0;
+	place_helper();
 
 	nodedesc->active = 1;
 	__sfence();
 
 	bool* skip = (bool*)malloc(max_nodes * sizeof(bool));
-	locpeercnt = nodedesc->ndxmax;
-	place_helper();
 
 	while( nodedesc->active ) {
 
-		if( locpeercnt != nodedesc->ndxmax ) {
-			locpeercnt = nodedesc->ndxmax;
-			place_helper();
-		}
+		//if( locpeercnt != nodedesc->ndxmax ) {
+		//	locpeercnt = nodedesc->ndxmax;
+		//	place_helper();
+		//}
 
 		memset(skip, 0, max_nodes * sizeof(bool));
 
@@ -1891,7 +1844,7 @@ static void* send_thread(void* arg)
 			if( !skip[peer_node] ) {
 				if( send_msg(frag) ) {
 
-					lockedAdd(&(nodedesc->sendqcnt[frag->peer]), -1);
+					lockedAdd(&(sendqcnt[(frag->peer) << 4]), -1);
 
 					if( next ) {
 						if( prev ) {

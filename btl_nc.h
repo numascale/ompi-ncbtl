@@ -55,6 +55,7 @@ BEGIN_C_DECLS
 
 #define NC_CLSIZE (64)    // cache line size
 
+#define MAX_NUMA_NODES 64
 #define MAX_GROUPS 720
 #define MAX_PROCS 4096
 #define MAX_PROCS_PER_NODE 32
@@ -221,6 +222,7 @@ typedef struct frag {
  */
 typedef struct fifolist {
 	volatile int32_t lock;
+int32_t pad[11];
 	frag_t* head;			
 	frag_t* tail;
 } fifolist_t;
@@ -249,10 +251,11 @@ struct msgstats_t {
 
 
 typedef struct ring {
-	volatile int32_t lock ALIGN8;
+	volatile int32_t lock ALIGN64;
 	uint32_t tail;  // read tail
 	int32_t  sbit;  // sync bit
 	int32_t  ttail; // ring reset flag
+int32_t pad[12];
 } ring_t;
 
 
@@ -273,10 +276,11 @@ typedef struct ringlist {
 
 
 typedef struct {
-	volatile int32_t lock ALIGN8;
+	volatile int32_t lock ALIGN64;
 	bool     commited;
 	uint32_t head;
 	int32_t  sbit;
+int32_t pad[12];
 } pring_t;
 
 
@@ -303,8 +307,12 @@ typedef struct {
 	int      max_nodes;
 	int      node_count;
 	int      rank_count;
+	int      num_smp_procs;
 	uint32_t map[MAX_PROCS]; // (group | cpuindex)
 	uint32_t cpuid[MAX_PROCS];
+	int32_t  group[MAX_NUMA_NODES];
+	int32_t  numadist[MAX_NUMA_NODES * MAX_NUMA_NODES];
+	int32_t  numanode[MAX_PROCS];
 } sysctxt_t;
 
 
@@ -317,7 +325,6 @@ struct mca_btl_nc_component_t {
 	int32_t    group;
 	int32_t    cpuindex;
 	int        statistics;			// create statistics
-	bool       preset_mem;
 	uint8_t*   shm_stat;			// statistics buffer
 	fifolist_t* pending_sends;
 
