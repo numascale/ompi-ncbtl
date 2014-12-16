@@ -55,10 +55,9 @@ BEGIN_C_DECLS
 
 #define NC_CLSIZE (64)    // cache line size
 
-#define MAX_NUMA_NODES 64
-#define MAX_GROUPS 720
+#define MAX_NUMA_NODES 256
+#define MAX_GROUPS 256
 #define MAX_PROCS 4096
-#define MAX_PROCS_PER_NODE 32
 
 #define MAX_EAGER_SIZE (4 * 1024)
 #define MAX_SEND_SIZE  (16 * 1024)
@@ -72,7 +71,7 @@ BEGIN_C_DECLS
 #define syncsize(s) ((s <= SHDR) ? 0 : ((((s >> 3) + 62) / 63) << 3))
 #define isyncsize(s) ((s <= SHDR) ? 0 : (((s - 16) >> 9) + 1) << 3)
 
-#define INTRA_NODE_DIST_MAX 40
+//#define INTRA_NODE_DIST_MAX 12
 
 #define RING_SIZE (256 * 1024)
 #define RING_SIZE_LOG2 (18)
@@ -222,7 +221,6 @@ typedef struct frag {
  */
 typedef struct fifolist {
 	volatile int32_t lock;
-int32_t pad[11];
 	frag_t* head;			
 	frag_t* tail;
 } fifolist_t;
@@ -251,11 +249,10 @@ struct msgstats_t {
 
 
 typedef struct ring {
-	volatile int32_t lock ALIGN64;
+	volatile int32_t lock;
 	uint32_t tail;  // read tail
 	int32_t  sbit;  // sync bit
 	int32_t  ttail; // ring reset flag
-int32_t pad[12];
 } ring_t;
 
 
@@ -276,26 +273,25 @@ typedef struct ringlist {
 
 
 typedef struct {
-	volatile int32_t lock ALIGN64;
+	volatile int32_t lock;
 	bool     commited;
 	uint32_t head;
 	int32_t  sbit;
-int32_t pad[12];
 } pring_t;
 
 
 typedef struct {
 	uint32_t         stail[MAX_GROUPS];
+	volatile int32_t fraglock ALIGN8;
+	int32_t*         sendqcnt ALIGN8;
+	int32_t          ring_cnt ALIGN8;
+	bool             inuse[MAX_GROUPS * 2];
 	volatile bool    active;
 	int32_t          cpuid;
 	bool             yieldcpu;
 	void*            shm_base;
 	void*	         shm_frags;		// base of frags in shared mem
-	volatile int32_t fraglock ALIGN8;
-	frag_t*          recvfrag[MAX_PROCS_PER_NODE];
-	int32_t*         sendqcnt;
-	int32_t          ring_cnt;
-	bool             inuse[MAX_GROUPS];
+	frag_t*          recvfrag[MAX_GROUPS];
 	// !must be last member
 	int32_t          ndxmax ALIGN8;	// max peer index on local node
 } node_t;
@@ -325,6 +321,7 @@ struct mca_btl_nc_component_t {
 	int32_t    group;
 	int32_t    cpuindex;
 	int        statistics;			// create statistics
+	int        grp_numa_dist;		// size of group in terms of numa distance
 	uint8_t*   shm_stat;			// statistics buffer
 	fifolist_t* pending_sends;
 

@@ -265,8 +265,9 @@ int mca_btl_nc_component_progress(void)
 	int ring_cnt = ringlist->cnt;
 
 	if( nodedesc->ring_cnt > ring_cnt ) {
+
 		for( int i = 0; i < MAX_GROUPS; i++ ) {
-			if( nodedesc->inuse[i] ) {
+			if( nodedesc->inuse[i << 1] ) {
 
 				// check if ring is already in use
 				bool inuse = false;
@@ -320,6 +321,7 @@ int mca_btl_nc_component_progress(void)
 			int type = rhdr->type;
 
 			if( (type & 1) != sbit ) {
+
 				// no message
 				int32_t z0 = ring->ttail;
 				int32_t z1 = (rtail >> (RING_SIZE_LOG2 - 2));
@@ -386,7 +388,6 @@ int mca_btl_nc_component_progress(void)
 						assert( frag );
 						frag = (frag_t*)PROCADDR(frag);
 					}
-
 					void* dst = (void*)(frag + 1) + frag->size;
 					frag->size += size;
 

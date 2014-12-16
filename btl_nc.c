@@ -407,7 +407,7 @@ static int add_to_group()
 	int group = -1;
 
 	for( int i = 0; i < max_nodes; i++ ) {
-		if( numadist[currnode * max_nodes + i] < INTRA_NODE_DIST_MAX ) {
+		if( numadist[currnode * max_nodes + i] <= mca_btl_nc_component.grp_numa_dist ) {
 			if( sysctxt->group[i] - 1 >= 0 ) {
 				group = sysctxt->group[i] - 1;
 				break;
@@ -441,16 +441,18 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 	int max_nodes = numa_num_configured_nodes();
 
     char* ev = getenv("NC_GROUP_NUMA_DIST");
-	int grp_numa_dist = 16;
+	int grp_numa_dist = 10;
 	if( ev && (sscanf(ev, "%d", &grp_numa_dist) == 1) ) {
-		if( grp_numa_dist < 0 || grp_numa_dist >= 100 ) {
+		if( grp_numa_dist <= 0 || grp_numa_dist >= 100 ) {
 			if( MY_RANK == 0 ) {
-				fprintf(stderr, "NC_GROUP_NUMA_DIST = %d INAVLID, USING DEFAULT VALUE = 16\n", grp_numa_dist);
+				fprintf(stderr, "NC_GROUP_NUMA_DIST = %d INAVLID, USING DEFAULT VALUE = 10\n", 
+					grp_numa_dist);
 				fflush(stderr);
 			}
-			grp_numa_dist = 16;
+			grp_numa_dist = 10;
 		}
 	}
+	mca_btl_nc_component.grp_numa_dist = grp_numa_dist;
 
 	size_t noderecsize = ((sizeof(node_t) + pagesize - 1) & ~(pagesize - 1));
 	size_t syssize = ((sizeof(sysctxt_t) + pagesize - 1) & ~(pagesize - 1));
@@ -556,6 +558,12 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 		pthread_create(&mca_btl_nc_component.sendthread, 0, &send_thread, 0);
 	}
 
+    ev = getenv("NCSTAT");
+    mca_btl_nc_component.statistics = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
+    if( mca_btl_nc_component.statistics ) {
+        mca_btl_nc_component.statistics = createstat(n);
+    }
+
 	// wait until send thread ready
 	while( !nodedesc->active );
 
@@ -576,12 +584,6 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 	fflush(stderr);
 }
 */
-    ev = getenv("NCSTAT");
-    mca_btl_nc_component.statistics = (ev && (!strcasecmp(ev, "yes") || !strcasecmp(ev, "true") || !strcasecmp(ev, "1")));
-    if( mca_btl_nc_component.statistics ) {
-        mca_btl_nc_component.statistics = createstat(n);
-    }
-
 	if( MY_RANK == 0 ) {
 		printf("************USING NC-BTL 1.8.3************\n");
 	}
@@ -1528,9 +1530,8 @@ static void init_ring(int peer_node)
 
 		if( !pr->commited ) {
 			node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
-			assert( (((uint64_t)peer_nodedesc) & 4095) == 0 );
 			
-			lockedAdd((int32_t*)&(peer_nodedesc->inuse[loc_node]), 1);		
+			lockedAdd((int32_t*)&(peer_nodedesc->inuse[loc_node << 1]), 1);		
 			pr->commited = true;
 			__sfence();
 
@@ -1700,7 +1701,6 @@ static void place_helper()
 	int c = cpu0;
 	int d = 1;
 	int s = 1;
-//cpuid = (cpu0 / 12) * 12;
 
 	while( d < 32 ) {
 		c += s * d;
@@ -1708,7 +1708,7 @@ static void place_helper()
 		++d;
 	
 		if( c >= 0 && c < max_cpus ) {
-			if( numa_dist(nodetab[c], numanode) < INTRA_NODE_DIST_MAX ) {
+			if( numa_dist(nodetab[c], numanode) <= mca_btl_nc_component.grp_numa_dist ) {
 
 				bool used = false;
 				for( int i = 0; i < rank_count; i++ ) {
@@ -1797,7 +1797,6 @@ static void* send_thread(void* arg)
 
 	ringbind();
 //	void* rings = mca_btl_nc_component.shm_base + mca_btl_nc_component.ring_ofs;
-//	memset(rings, 0, max_nodes * RING_SIZE);
 //	memclear(rings, max_nodes * RING_SIZE);
 
 	nodedesc->shm_base = mca_btl_nc_component.shm_base;
@@ -1815,7 +1814,6 @@ static void* send_thread(void* arg)
 
 	while( sysctxt->rank_count < sysctxt->num_smp_procs );
 
-	int	locpeercnt = 0;
 	place_helper();
 
 	nodedesc->active = 1;
@@ -1824,11 +1822,6 @@ static void* send_thread(void* arg)
 	bool* skip = (bool*)malloc(max_nodes * sizeof(bool));
 
 	while( nodedesc->active ) {
-
-		//if( locpeercnt != nodedesc->ndxmax ) {
-		//	locpeercnt = nodedesc->ndxmax;
-		//	place_helper();
-		//}
 
 		memset(skip, 0, max_nodes * sizeof(bool));
 
@@ -1842,6 +1835,7 @@ static void* send_thread(void* arg)
 			int peer_node = frag->node;
 
 			if( !skip[peer_node] ) {
+
 				if( send_msg(frag) ) {
 
 					lockedAdd(&(sendqcnt[(frag->peer) << 4]), -1);
