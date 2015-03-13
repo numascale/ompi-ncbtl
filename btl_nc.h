@@ -11,8 +11,8 @@
  *                         All rights reserved.
  * Copyright (c) 2006-2007 Voltaire. All rights reserved.
  * Copyright (c) 2009-2010 Cisco Systems, Inc.  All rights reserved.
- * Copyright (c) 2010-2013 Los Alamos National Security, LLC.  
- *                         All rights reserved. 
+ * Copyright (c) 2010-2013 Los Alamos National Security, LLC.
+ *                         All rights reserved.
  * Copyright (c) 2010-2012 IBM Corporation.  All rights reserved.
  * $COPYRIGHT$
  *
@@ -60,7 +60,7 @@ BEGIN_C_DECLS
 #define MAX_PROCS 4096
 
 #define MAX_EAGER_SIZE (4 * 1024)
-#define MAX_SEND_SIZE  (16 * 1024)
+#define MAX_SEND_SIZE  (8 * 1024)
 #define MAX_MSG_SIZE   (16 * 1024 * 1024)
 #define MAX_SIZE_FRAGS (1024 * 1024 * 1024)
 
@@ -71,10 +71,10 @@ BEGIN_C_DECLS
 #define syncsize(s) ((s <= SHDR) ? 0 : ((((s >> 3) + 62) / 63) << 3))
 #define isyncsize(s) ((s <= SHDR) ? 0 : (((s - 16) >> 9) + 1) << 3)
 
-//#define INTRA_NODE_DIST_MAX 12
+#define INTRA_GROUP_NUMA_DIST 10
 
-#define RING_SIZE (256 * 1024)
-#define RING_SIZE_LOG2 (18)
+#define RING_SIZE (64 * 1024)
+#define RING_SIZE_LOG2 (16)
 
 #define SEMLOCK_UNLOCKED 0
 #define SEMLOCK_LOCKED 1
@@ -221,17 +221,17 @@ typedef struct frag {
  */
 typedef struct fifolist {
 	volatile int32_t lock;
-	frag_t* head;			
+	frag_t* head;
 	frag_t* tail;
 } fifolist_t;
 
 
-struct mca_btl_nc_hdr_t { 
+struct mca_btl_nc_hdr_t {
     mca_btl_base_descriptor_t       base;
     mca_btl_nc_segment_t            segment;
     struct mca_btl_base_endpoint_t* endpoint;
     mca_btl_base_tag_t              tag;
-	int32_t							reserve;  
+	int32_t							reserve;
 	int32_t				            src_rank;
 	frag_t*							self;
 };
@@ -257,7 +257,7 @@ typedef struct ring {
 
 
 typedef struct ringdesc {
-	ring_t*          ring;			
+	ring_t*          ring;
 	void*  	         ringbuf;
 	int32_t          ndx;
 	struct ringdesc* prev;
@@ -267,7 +267,7 @@ typedef struct ringdesc {
 
 typedef struct ringlist {
 	int32_t     cnt;
-	ringdesc_t* head;			
+	ringdesc_t* head;
 	ringdesc_t* tail;
 } ringlist_t;
 
@@ -287,8 +287,8 @@ typedef struct {
 	int32_t          ring_cnt ALIGN8;
 	bool             inuse[MAX_GROUPS * 2];
 	volatile bool    active;
-	int32_t          cpuid;
-	bool             yieldcpu;
+	pthread_cond_t	 send_cond;
+	pthread_mutex_t	 send_mutex;
 	void*            shm_base;
 	void*	         shm_frags;		// base of frags in shared mem
 	frag_t*          recvfrag[MAX_GROUPS];
@@ -318,43 +318,43 @@ typedef struct {
 struct mca_btl_nc_component_t {
     mca_btl_base_component_2_0_0_t super;  /**< base BTL component */
 
-	int32_t    group;
-	int32_t    cpuindex;
-	int        statistics;			// create statistics
-	int        grp_numa_dist;		// size of group in terms of numa distance
-	uint8_t*   shm_stat;			// statistics buffer
+	int32_t     group;
+	int32_t     cpuindex;
+	int         statistics;			// create statistics
+	int         grp_numa_dist;		// size of group in terms of numa distance
+	uint8_t*    shm_stat;			// statistics buffer
 	fifolist_t* pending_sends;
 
-	sysctxt_t* sysctxt;				// global shm mapping info
-	pthread_t  sendthread;
+	sysctxt_t*  sysctxt;			// global shm mapping info
+	pthread_t   sendthread;
 
-	uint32_t** stail;				// pointers to local send tails
-	uint32_t** peer_stail;			// pointers to peers send tails
+	uint32_t**  stail;				// pointers to local send tails
+	uint32_t**  peer_stail;			// pointers to peers send tails
 
 	fifolist_t* inq;				// input queues
 	fifolist_t* myinq;				// local input queue
 	int32_t*    sendqcnt;
 
-	uint32_t*  map;
+	uint32_t*   map;
 
-	node_t**   peer_node;
-	node_t*    nodedesc;
+	node_t**    peer_node;
+	node_t*     nodedesc;
 
-	uint64_t   shmsize;
-	void*      shm_base;
-	void*      shm_ringbase;
-	void*      shm_fragbase;
-	uint64_t   shm_ofs;
-	uint64_t   ring_ofs;
-	uint64_t   frag_ofs;
+	uint64_t    shmsize;
+	void*       shm_base;
+	void*       shm_ringbase;
+	void*       shm_fragbase;
+	uint64_t    shm_ofs;
+	uint64_t    ring_ofs;
+	uint64_t    frag_ofs;
 
-	ring_t*    ring;
-	pring_t*   peer_ring;
-	void**     peer_ring_buf;
-	ringlist_t ringlist;
+	ring_t*     ring;
+	pring_t*    peer_ring;
+	void**      peer_ring_buf;
+	ringlist_t  ringlist;
 
-    int32_t    num_smp_procs;		// current number of smp procs on this host
-    int32_t    my_smp_rank;			// My SMP process rank.  Used for accessing
+    int32_t     num_smp_procs;		// current number of smp procs on this host
+    int32_t     my_smp_rank;			// My SMP process rank.  Used for accessing
 };
 typedef struct mca_btl_nc_component_t mca_btl_nc_component_t;
 OMPI_MODULE_DECLSPEC extern mca_btl_nc_component_t mca_btl_nc_component;
