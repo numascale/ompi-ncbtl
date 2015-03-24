@@ -1012,6 +1012,7 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
         frag = allocfrag(rsize);
         if( !frag ) {
             // upper layers will call progress() first and than try sending again
+            assert( false );
             return OMPI_ERR_RESOURCE_BUSY;
         }
     }
@@ -1043,6 +1044,7 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 		if( rc < 0 ) {
 			freefrag(frag);
 			// upper layers will call progress() first and than try sending again
+			assert( false );
 			return OMPI_ERR_RESOURCE_BUSY;
 		}
 	}
@@ -1079,6 +1081,7 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 		dst += ssize;
 		nccopy(dst, data, size8);
 	}
+
 	__sfence();
 	*descriptor = 0;
 
@@ -1212,6 +1215,7 @@ int mca_btl_nc_send( struct mca_btl_base_module_t* btl,
 		frag->msgtype = MSG_TYPE_FRAG;
 		push_peerq(dst & 0xffff, frag);
 	}
+
 	return 1;
 }
 
@@ -1285,6 +1289,7 @@ static bool send_msg(frag_t* frag)
 			dst += ssize;
 			nccopy(dst, data, size8);
 		}
+
 		__sfence();
 
 		ofs += size;
@@ -1329,6 +1334,7 @@ void sendack(int peer, void* hdr)
 	uint32_t rsize = sizeof(rhdr_t) + sizeof(void*);
 
 	int sbit;
+
 	void* rbuf = allocring(peer_node, rsize, &sbit);
 
 	if( !rbuf ) {
@@ -1363,13 +1369,14 @@ void sendack(int peer, void* hdr)
 
 	assert( rhdr->rsize > 0 );
 
-	uint8_t* data = (uint8_t*)(rhdr + 1);
+	void* data = rhdr + 1;
 	*(void**)data = hdr;
 
-	if( sbit ) {
-		*((uint64_t*)data) |= 1;
-	}
+	void* sbits = (void*)&rhdr->sbits;
+	sbitset256(sbits, data, sizeof(void*), sbit);
+
 	nccopy(rbuf, buf, rsize);
+
 	__sfence();
 
     if( mca_btl_nc_component.statistics ) {
@@ -1415,10 +1422,14 @@ frag_t* allocfrag(int size)
 			break;
 		}
 		if( frag->lastfrag ) {
-			fprintf(stderr, "****WARNING : OUT OF FRAGMENT MEMORY\n");
+			fprintf(stderr, "****WARNING : OUT OF FRAGMENT MEMORY, RANK %d\n", MY_RANK);
 			fflush(stderr);
 			__semunlock(&nodedesc->fraglock);
-			return 0;
+
+			frag = (frag_t*)mca_btl_nc_component.shm_fragbase;
+			usleep(1000000);
+			__semlock(&nodedesc->fraglock);
+			continue;
 		}
 
 		frag = (frag_t*)((uint8_t*)frag + frag->fsize);
@@ -1546,7 +1557,7 @@ static void push_sendq(int peer, frag_t* frag)
 static void init_ring(int peer_node)
 {
 	int loc_node = mca_btl_nc_component.group;
-	assert( peer_node != loc_node );
+//	assert( peer_node != loc_node );
 
 	void* ring_addr = map_shm(peer_node, mca_btl_nc_component.shmsize);
 	assert( ring_addr );
@@ -1558,10 +1569,10 @@ static void init_ring(int peer_node)
 		__semlock(&pr->lock);
 
 		if( !pr->commited ) {
-			node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
-
-			lockedAdd((int32_t*)&(peer_nodedesc->inuse[loc_node << 1]), 1);
 			pr->commited = true;
+
+			node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
+			lockedAdd((int32_t*)&(peer_nodedesc->inuse[loc_node << 1]), 1);
 			__sfence();
 
 			lockedAdd(&peer_nodedesc->ring_cnt, 1);
@@ -1576,6 +1587,7 @@ static void init_ring(int peer_node)
 static uint8_t* allocring(int peer_node, int size8, int* sbit)
 {
 	assert( (size8 & 7) == 0 );
+	assert( size8 < RING_SIZE / 2 );
 
 	void* ring_buf = mca_btl_nc_component.peer_ring_buf[peer_node];
 
@@ -1589,14 +1601,13 @@ static uint8_t* allocring(int peer_node, int size8, int* sbit)
 	static const int RING_GUARD = 8;
 	uint8_t* buf = 0;
 
-	uint32_t tail = *(mca_btl_nc_component.stail[peer_node]);
-
 	// peer ring descriptor is in shared mem
-	pring_t* pr = mca_btl_nc_component.peer_ring + peer_node;
+	volatile pring_t* pr = mca_btl_nc_component.peer_ring + peer_node;
 
 	__semlock(&pr->lock);
 
 	uint32_t head = pr->head;
+	uint32_t tail = *(mca_btl_nc_component.stail[peer_node]);
 
 	if( head >= tail ) {
 		if( head + size8 + RING_GUARD <= RING_SIZE ) {
@@ -1814,13 +1825,11 @@ static void* send_thread(void* arg)
 		}
 
 		if( !list->head && !pthread_mutex_trylock(sendq_mutex) ) {
-
 			while( !list->head ) {
 				// pthread_cond_wait() unlocks the mutex. thus you must
 				// always have ownership of the mutex before invoking it
 				// pthread_cond_wait() returns with the mutex locked
 				pthread_cond_wait(&nodedesc->send_cond, &nodedesc->send_mutex);
-
 				if( !nodedesc->active ) {
 					return NULL;
 				}

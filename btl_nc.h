@@ -60,7 +60,7 @@ BEGIN_C_DECLS
 #define MAX_PROCS 4096
 
 #define MAX_EAGER_SIZE (4 * 1024)
-#define MAX_SEND_SIZE  (8 * 1024)
+#define MAX_SEND_SIZE  (16 * 1024)
 #define MAX_MSG_SIZE   (16 * 1024 * 1024)
 #define MAX_SIZE_FRAGS (1024 * 1024 * 1024)
 
@@ -73,8 +73,8 @@ BEGIN_C_DECLS
 
 #define INTRA_GROUP_NUMA_DIST 10
 
-#define RING_SIZE (64 * 1024)
-#define RING_SIZE_LOG2 (16)
+#define RING_SIZE (256 * 1024)
+#define RING_SIZE_LOG2 (18)
 
 #define SEMLOCK_UNLOCKED 0
 #define SEMLOCK_LOCKED 1
@@ -160,6 +160,7 @@ static void forceinline __nccopy8(void* to, const void* from)
     __asm__ __volatile__ (
         "movq (%0), %%rax\n"
         "movnti %%rax, (%1)\n"
+		"sfence\n"
         :: "r" (from), "r" (to) : "rax", "memory");
 }
 
@@ -260,7 +261,6 @@ typedef struct ringdesc {
 	ring_t*          ring;
 	void*  	         ringbuf;
 	int32_t          ndx;
-	struct ringdesc* prev;
 	struct ringdesc* next;
 } ringdesc_t;
 
@@ -268,7 +268,6 @@ typedef struct ringdesc {
 typedef struct ringlist {
 	int32_t     cnt;
 	ringdesc_t* head;
-	ringdesc_t* tail;
 } ringlist_t;
 
 

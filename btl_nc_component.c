@@ -56,8 +56,8 @@
 #include "ompi/mca/pml/ob1/pml_ob1_hdr.h"
 
 #include "btl_nc.h"
- 
- 
+
+
 static void fifo_push_back(fifolist_t* list, frag_t* frag);
 static int mca_btl_nc_component_open(void);
 static int mca_btl_nc_component_close(void);
@@ -181,7 +181,7 @@ mca_btl_base_module_t** mca_btl_nc_component_init(
     if (!orte_create_session_dirs) {
         return NULL;
     }
-    
+
     /* allocate the Shared Memory BTL */
     *num_btls = 1;
     btls = (mca_btl_base_module_t**)malloc(sizeof(mca_btl_base_module_t*));
@@ -259,46 +259,41 @@ int mca_btl_nc_component_progress(void)
 		return 1;
 	}
 
-	node_t* nodedesc = mca_btl_nc_component.nodedesc;
+	volatile node_t* nodedesc = mca_btl_nc_component.nodedesc;
 	ringlist_t* ringlist = &mca_btl_nc_component.ringlist;
 
 	int ring_cnt = ringlist->cnt;
 
-	if( nodedesc->ring_cnt > ring_cnt ) {
+    if( nodedesc->ring_cnt > ring_cnt ) {
 
-		for( int i = 0; i < MAX_GROUPS; i++ ) {
-			if( nodedesc->inuse[i << 1] ) {
+        for( int i = 0; i < MAX_GROUPS; i++ ) {
+            if( nodedesc->inuse[i << 1] ) {
 
-				// check if ring is already in use
+			 	// check if ring is already in use
 				bool inuse = false;
-				ringdesc_t* r = ringlist->head;
-				while( r ) {
-					if( r->ndx == i ) {
-						inuse = true;
-						break;
-					}
-					r = r->next;
-				}
+        	    ringdesc_t* r = ringlist->head;
+            	while( r ) {
+                	if( r->ndx == i ) {
+                    	inuse = true;
+	                    break;
+    	            }
+        	        r = r->next;
+            	}
 
-				if( !inuse ) {
+	            if( !inuse ) {
 					// prepend to ringlist
-					ringdesc_t* r = (ringdesc_t*)malloc(sizeof(ringdesc_t));
-					r->ring = mca_btl_nc_component.ring + i;
-					r->ringbuf = mca_btl_nc_component.shm_ringbase + (i * RING_SIZE);	
-					r->ndx = i;
-					r->prev = 0;
+ 					ringdesc_t* r = (ringdesc_t*)malloc(sizeof(ringdesc_t));
+                    r->ring = mca_btl_nc_component.ring + i;
+                    r->ringbuf = mca_btl_nc_component.shm_ringbase + (i * RING_SIZE);
+                    r->ndx = i;
 
-					r->next = ringlist->head;
-					ringlist->head = r;
-
-					if( !r->next ) {
-						ringlist->tail = r;
-					}
-					++ringlist->cnt;
-				}
-			}
-		}
-	}
+                    r->next = ringlist->head;
+                    ringlist->head = r;
+                    ++ringlist->cnt;
+                }
+            }
+        }
+    }
 
 	ringdesc_t* ringdesc = ringlist->head;
 
@@ -316,6 +311,8 @@ int mca_btl_nc_component_progress(void)
 		uint32_t rtail = ring->tail;
 		rhdr_t* rhdr = (rhdr_t*)(ringdesc->ringbuf + rtail);
 
+        int rndx = ringdesc->ndx;
+
 		for( ; ; ) {
 
 			int type = rhdr->type;
@@ -326,15 +323,16 @@ int mca_btl_nc_component_progress(void)
 				int32_t z0 = ring->ttail;
 				int32_t z1 = (rtail >> (RING_SIZE_LOG2 - 2));
 				assert( z1 <= 3 ); // do 3 intermediate ring resets
-				if( (z1 > z0) && __sync_bool_compare_and_swap(&ring->ttail, z0, z1) ) {
+				if( z1 > z0 ) {
 					// reset remote tail
-					// use one cache line per counter
-					uint32_t* ptail = mca_btl_nc_component.peer_stail[ringdesc->ndx] + mca_btl_nc_component.group; 
+					uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
 					__nccopy4(ptail, rtail);
+					ring->ttail = z1;
 				}
 				break;
 			}
-
+            
+            assert( type );
 			type &= ~1;
 			int rsize = (rhdr->rsize << 2);
 
@@ -358,7 +356,7 @@ int mca_btl_nc_component_progress(void)
 				if( !(type & MSG_TYPE_BLK) ) {
 					frag = allocfrag(rsize);
 					if( !frag ) {
-						return 0;
+						break;
 					}
 
 					frag->msgtype = type;
@@ -367,54 +365,55 @@ int mca_btl_nc_component_progress(void)
 					void* src = (void*)(rhdr + 1) + ssize;
 					void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
 					sbitreset(frag + 1, sbits, src, size8, sbit);
+					
 					done = true;
 				}
 				else {
-					int ndx = ringdesc->ndx;
-					frag = nodedesc->recvfrag[ndx];
+                    frag = nodedesc->recvfrag[rndx];
 
-					if( !frag ) {
-						int bufsize = sizeof(rhdr) + ((rhdr->sbits + 7) & ~7);
+                    if( !frag ) {
+                        int bufsize = sizeof(rhdr) + ((rhdr->sbits + 7) & ~7);
 
-						frag = allocfrag(bufsize);
-						if( !frag ) {
-							return 0;
-						}
-						nodedesc->recvfrag[ndx] = (void*)NODEADDR(frag);
-						frag->size = 0;
-					}
-					else {
-						frag = nodedesc->recvfrag[ndx];
-						assert( frag );
-						frag = (frag_t*)PROCADDR(frag);
-					}
-					void* dst = (void*)(frag + 1) + frag->size;
-					frag->size += size;
+                        frag = allocfrag(bufsize);
+                        if( !frag ) {
+                            return 0;
+                        }
+                        nodedesc->recvfrag[rndx] = (void*)NODEADDR(frag);
+                        frag->size = 0;
+                    }
+                    else {
+                        frag = nodedesc->recvfrag[rndx];
+                        assert( frag );
+                        frag = (frag_t*)PROCADDR(frag);
+                    }
+                    void* dst = (void*)(frag + 1) + frag->size;
+                    frag->size += size;
 
-					void* src = (void*)(rhdr + 1) + ssize;
-					void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
-					sbitreset(dst, sbits, src, size8, sbit);
+                    void* src = (void*)(rhdr + 1) + ssize;
+                    void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+                    sbitreset(dst, sbits, src, size8, sbit);
 
-					if( type == MSG_TYPE_BLKN ) {
-						frag->msgtype = MSG_TYPE_FRAG;
-						nodedesc->recvfrag[ndx] = 0;
-						done = true;
-					}
-				}
+                    if( type == MSG_TYPE_BLKN ) {
+                        frag->msgtype = MSG_TYPE_FRAG;
+                        nodedesc->recvfrag[rndx] = 0;
+                        done = true;
+                    }
+                }
 
-				rtail += rsize;		
+                rtail += rsize;
 
-				if( done ) {
-					if( local ) {
-						fifo_push_back((fifolist_t*)list, frag);
-					}
-					else {
-						fifolist_t* list = mca_btl_nc_component.inq + rhdr->dst_ndx;
-						fifo_push_back((fifolist_t*)list, frag);
-					}
-					break;
-				}
-				rhdr = (rhdr_t*)((uint8_t*)rhdr + rsize);			
+                if( done ) {
+                    if( local ) {
+                        fifo_push_back((fifolist_t*)list, frag);
+                    }
+                    else {
+                        fifolist_t* list = mca_btl_nc_component.inq + rhdr->dst_ndx;
+                        fifo_push_back((fifolist_t*)list, frag);
+                    }
+                    break;
+                }
+                rhdr = (rhdr_t*)((uint8_t*)rhdr + rsize);
+				break;
 			}
 			else {
 				// handle ring reset marker
@@ -424,7 +423,7 @@ int mca_btl_nc_component_progress(void)
 					memset8((uint8_t*)rhdr, sbit, n);
 				}
 				// use one cache line per counter
-				uint32_t* ptail = mca_btl_nc_component.peer_stail[ringdesc->ndx] + mca_btl_nc_component.group;
+				uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
 				__nccopy4(ptail, 0);
 
 				rtail = 0;
@@ -432,7 +431,7 @@ int mca_btl_nc_component_progress(void)
 				ring->ttail = 0;
 				ring->sbit = sbit;
 				sbit ^= 1;
-			}		
+			}
 		}
 
 		ring->tail = rtail;
@@ -465,7 +464,7 @@ static void processmsg(int type, const void* src, int size)
 	    msg.base.des_dst = &(msg.hdr_payload);
 
 	    msg.hdr_payload.seg_addr.pval = (void*)src;
-		msg.hdr_payload.seg_len = size; 
+		msg.hdr_payload.seg_len = size;
 
     	static mca_btl_active_message_callback_t* mreg =
 				mca_btl_base_active_message_trigger + MCA_PML_OB1_HDR_TYPE_MATCH;
@@ -502,7 +501,7 @@ static void processmsg(int type, const void* src, int size)
         assert( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags );
 
         hdr->base.des_cbfunc(&mca_btl_nc.super, hdr->endpoint, &hdr->base, OMPI_SUCCESS);
-		
+
 		freefrag(frag);
 	}
 }
@@ -544,14 +543,14 @@ static void sbitreset(void* dst, const void* sbits, const void* src, int size8, 
 	}
 	else {
 		// pointer to sync bits
-		volatile uint64_t* _sbits = (uint64_t*)sbits; 
+		volatile uint64_t* _sbits = (uint64_t*)sbits;
 		assert( ((uint64_t)_sbits & 0x7) == 0 );
 
 		uint64_t b;
 		int k = 0;
 
 		for( ; ; ) {
-			if( !k ) { 
+			if( !k ) {
 				while( ((*_sbits) & 1) != sbit ) {
 					__lfence();
 				}
@@ -602,8 +601,8 @@ static void memcpy8(void* to, const void* from, int n)
 		"1:\n"
 		"movq (%%rsi), %%rax\n"
 		"movq %%rax, (%%rdi)\n"
-		"addq $8, %%rsi\n" 
-		"addq $8, %%rdi\n" 
+		"addq $8, %%rsi\n"
+		"addq $8, %%rdi\n"
 		"loop 1b\n"
 	    : : "r" (n), "r" (from), "r" (to) : "ecx", "rax", "rsi", "rdi", "memory");
 }
@@ -622,7 +621,7 @@ static void memset8(void* to, uint64_t val, int n)
 		"movq %2, %%rdi\n"
 		"1:\n"
 		"movnti %%rax, (%%rdi)\n"
-		"addq $8, %%rdi\n" 
+		"addq $8, %%rdi\n"
 		"loop 1b\n"
 		"sfence\n"
 	    : : "r" (n), "r" (val), "r" (to) : "ecx", "rax", "rdi", "memory");
