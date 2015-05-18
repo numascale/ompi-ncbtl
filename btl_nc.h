@@ -1,3 +1,4 @@
+/* -*- Mode: C; c-basic-offset:4 ; indent-tabs-mode:nil -*- */
 /*
  * Copyright (c) 2004-2007 The Trustees of Indiana University and Indiana
  *                         University Research and Technology
@@ -89,41 +90,41 @@ BEGIN_C_DECLS
 
 static void forceinline __semlock(volatile int32_t* v)
 {
-	__asm__ __volatile__ (
-		"movl $1, %%ebx\n"
-		"1:\n"
-		"xorl %%eax, %%eax\n"
+    __asm__ __volatile__ (
+        "movl $1, %%ebx\n"
+        "1:\n"
+        "xorl %%eax, %%eax\n"
         "lock cmpxchgl %%ebx, %0\n"
-		"jnz 1b\n"
+        "jnz 1b\n"
         : "+m" (*v) : : "eax", "ebx", "memory");
 }
 
 
 static bool forceinline __semtrylock(volatile int32_t* v)
 {
-	int rc;
-	__asm__ __volatile__ (
-		"movl $1, %%ebx\n"
-		"xorl %%eax, %%eax\n"
+    int rc;
+    __asm__ __volatile__ (
+        "movl $1, %%ebx\n"
+        "xorl %%eax, %%eax\n"
         "lock cmpxchgl %%ebx, %0\n"
-		"xorl $1, %%eax\n"
-		"movl %%eax, %1\n"
+        "xorl $1, %%eax\n"
+        "movl %%eax, %1\n"
         : "+m" (*v), "=r"(rc) : : "eax", "ebx", "memory");
-	return rc;
+    return rc;
 }
 
 
 static void forceinline __semunlock(volatile int32_t* v)
 {
-	__asm__ __volatile__ (
-	   "movl $0, (%0)\n"
+    __asm__ __volatile__ (
+        "movl $0, (%0)\n"
         : : "r" (v) : "memory");
 }
 
 
 static inline int32_t lockedAdd(volatile int32_t* v, int val)
 {
-	return (int32_t)__sync_add_and_fetch(v, val);
+    return (int32_t)__sync_add_and_fetch(v, val);
 }
 
 
@@ -145,9 +146,9 @@ static void forceinline __mfence() {
 static void forceinline __nccopy4(void* to, const uint32_t head)
 {
     __asm__ __volatile__ (
-		"movl %0, %%eax\n"
-		"movnti %%eax, (%1)\n"
-		"sfence\n"
+        "movl %0, %%eax\n"
+        "movnti %%eax, (%1)\n"
+        "sfence\n"
         :: "r" (head), "r" (to) : "eax", "memory");
 }
 
@@ -160,7 +161,7 @@ static void forceinline __nccopy8(void* to, const void* from)
     __asm__ __volatile__ (
         "movq (%0), %%rax\n"
         "movnti %%rax, (%1)\n"
-		"sfence\n"
+        "sfence\n"
         :: "r" (from), "r" (to) : "rax", "memory");
 }
 
@@ -169,12 +170,12 @@ static void forceinline __nccopy8(void* to, const void* from)
  * ring header
  */
 typedef struct {
-	uint32_t type    : 6;  // sync bit and message type
-	uint32_t dst_ndx : 6;  // destination cpu index in group sharing ring
-	uint32_t rsize   : 16; // size in ring
-	uint32_t pad8    : 3;  // padding bytes used for 8 bytes alignment
-	uint32_t unused  : 1;  // unused
-	uint32_t sbits;		   // synchronization bits
+    uint32_t type    : 6;  // sync bit and message type
+    uint32_t dst_ndx : 6;  // destination cpu index in group sharing ring
+    uint32_t rsize   : 16; // size in ring
+    uint32_t pad8    : 3;  // padding bytes used for 8 bytes alignment
+    uint32_t unused  : 1;  // unused
+    uint32_t sbits;                // synchronization bits
 } rhdr_t;
 
 
@@ -203,17 +204,17 @@ struct fifolist; // forward declaration
  * message fragment
  */
 typedef struct frag {
-	int32_t      fsize;		// frag size
-	bool         inuse;     // fragment is in use
-	int32_t      size;		// message body size including mpi headers
-	int32_t      prevsize;	// previous frag size
-	int32_t      peer;
-	int32_t      node;	    // target node
-	int32_t      ofs;		// offset of data already procesed
-	int32_t      rsize;     // total size in ring
-	bool         lastfrag;  // last frag in pool
-	int32_t      msgtype;
-	struct frag* next;		// next in list, next in pool is determined by size
+    int32_t      fsize;         // frag size
+    bool         inuse;     // fragment is in use
+    int32_t      size;          // message body size including mpi headers
+    int32_t      prevsize;      // previous frag size
+    int32_t      peer;
+    int32_t      node;      // target node
+    int32_t      ofs;           // offset of data already procesed
+    int32_t      rsize;     // total size in ring
+    bool         lastfrag;  // last frag in pool
+    int32_t      msgtype;
+    struct frag* next;          // next in list, next in pool is determined by size
 } frag_t;
 
 
@@ -221,9 +222,9 @@ typedef struct frag {
  * pending sends fifo list
  */
 typedef struct fifolist {
-	volatile int32_t lock;
-	frag_t* head;
-	frag_t* tail;
+    volatile int32_t lock;
+    frag_t* head;
+    frag_t* tail;
 } fifolist_t;
 
 
@@ -232,9 +233,9 @@ struct mca_btl_nc_hdr_t {
     mca_btl_nc_segment_t            segment;
     struct mca_btl_base_endpoint_t* endpoint;
     mca_btl_base_tag_t              tag;
-	int32_t							reserve;
-	int32_t				            src_rank;
-	frag_t*							self;
+    int32_t                         reserve;
+    int32_t                         src_rank;
+    frag_t*                         self;
 };
 typedef struct mca_btl_nc_hdr_t mca_btl_nc_hdr_t;
 
@@ -250,64 +251,64 @@ struct msgstats_t {
 
 
 typedef struct ring {
-	volatile int32_t lock;
-	uint32_t tail;  // read tail
-	int32_t  sbit;  // sync bit
-	int32_t  ttail; // ring reset flag
+    volatile int32_t lock;
+    uint32_t         tail;  // read tail
+    int32_t          sbit;  // sync bit
+    int32_t          ttail; // ring reset flag
 } ring_t;
 
 
 typedef struct ringdesc {
-	ring_t*          ring;
-	void*  	         ringbuf;
-	int32_t          ndx;
-	struct ringdesc* next;
+    ring_t*          ring;
+    void*            ringbuf;
+    int32_t          ndx;
+    struct ringdesc* next;
 } ringdesc_t;
 
 
 typedef struct ringlist {
-	int32_t     cnt;
-	ringdesc_t* head;
+    int32_t     cnt;
+    ringdesc_t* head;
 } ringlist_t;
 
 
 typedef struct {
-	volatile int32_t lock;
-	bool     commited;
-	uint32_t head;
-	int32_t  sbit;
+    volatile int32_t lock;
+    bool             commited;
+    uint32_t         head;
+    int32_t          sbit;
 } pring_t;
 
 
 typedef struct {
-	uint32_t         stail[MAX_GROUPS];
-	volatile int32_t fraglock ALIGN8;
-	int32_t*         sendqcnt ALIGN8;
-	int32_t          ring_cnt ALIGN8;
-	bool             inuse[MAX_GROUPS * 2];
-	volatile bool    active;
-	pthread_cond_t	 send_cond;
-	pthread_mutex_t	 send_mutex;
-	void*            shm_base;
-	void*	         shm_frags;		// base of frags in shared mem
-	frag_t*          recvfrag[MAX_GROUPS];
-	// !must be last member
-	int32_t          ndxmax ALIGN8;	// max peer index on local node
+    uint32_t         stail[MAX_GROUPS];
+    volatile int32_t fraglock ALIGN8;
+    int32_t*         sendqcnt ALIGN8;
+    int32_t          ring_cnt ALIGN8;
+    bool             inuse[MAX_GROUPS * 2];
+    volatile bool    active;
+    pthread_cond_t   send_cond;
+    pthread_mutex_t  send_mutex;
+    void*            shm_base;
+    void*            shm_frags;             // base of frags in shared mem
+    frag_t*          recvfrag[MAX_GROUPS];
+    // !must be last member
+    int32_t          ndxmax ALIGN8; // max peer index on local node
 } node_t;
 
 
 typedef struct {
-	volatile int32_t lock ALIGN8;
-	int      readycnt;
-	int      max_nodes;
-	int      node_count;
-	int      rank_count;
-	int      num_smp_procs;
-	uint32_t map[MAX_PROCS]; // (group | cpuindex)
-	uint32_t cpuid[MAX_PROCS];
-	int32_t  group[MAX_NUMA_NODES];
-	int32_t  numadist[MAX_NUMA_NODES * MAX_NUMA_NODES];
-	int32_t  numanode[MAX_PROCS];
+    volatile int32_t lock ALIGN8;
+    int      readycnt;
+    int      max_nodes;
+    int      node_count;
+    int      rank_count;
+    int      num_smp_procs;
+    uint32_t map[MAX_PROCS]; // (group | cpuindex)
+    uint32_t cpuid[MAX_PROCS];
+    int32_t  group[MAX_NUMA_NODES];
+    int32_t  numadist[MAX_NUMA_NODES * MAX_NUMA_NODES];
+    int32_t  numanode[MAX_PROCS];
 } sysctxt_t;
 
 
@@ -317,43 +318,43 @@ typedef struct {
 struct mca_btl_nc_component_t {
     mca_btl_base_component_2_0_0_t super;  /**< base BTL component */
 
-	int32_t     group;
-	int32_t     cpuindex;
-	int         statistics;			// create statistics
-	int         grp_numa_dist;		// size of group in terms of numa distance
-	uint8_t*    shm_stat;			// statistics buffer
-	fifolist_t* pending_sends;
+    int32_t     group;
+    int32_t     cpuindex;
+    int         statistics;                 // create statistics
+    int         grp_numa_dist;              // size of group in terms of numa distance
+    uint8_t*    shm_stat;                   // statistics buffer
+    fifolist_t* pending_sends;
 
-	sysctxt_t*  sysctxt;			// global shm mapping info
-	pthread_t   sendthread;
+    sysctxt_t*  sysctxt;                    // global shm mapping info
+    pthread_t   sendthread;
 
-	uint32_t**  stail;				// pointers to local send tails
-	uint32_t**  peer_stail;			// pointers to peers send tails
+    uint32_t**  stail;                              // pointers to local send tails
+    uint32_t**  peer_stail;                 // pointers to peers send tails
 
-	fifolist_t* inq;				// input queues
-	fifolist_t* myinq;				// local input queue
-	int32_t*    sendqcnt;
+    fifolist_t* inq;                                // input queues
+    fifolist_t* myinq;                              // local input queue
+    int32_t*    sendqcnt;
 
-	uint32_t*   map;
+    uint32_t*   map;
 
-	node_t**    peer_node;
-	node_t*     nodedesc;
+    node_t**    peer_node;
+    node_t*     nodedesc;
 
-	uint64_t    shmsize;
-	void*       shm_base;
-	void*       shm_ringbase;
-	void*       shm_fragbase;
-	uint64_t    shm_ofs;
-	uint64_t    ring_ofs;
-	uint64_t    frag_ofs;
+    uint64_t    shmsize;
+    void*       shm_base;
+    void*       shm_ringbase;
+    void*       shm_fragbase;
+    uint64_t    shm_ofs;
+    uint64_t    ring_ofs;
+    uint64_t    frag_ofs;
 
-	ring_t*     ring;
-	pring_t*    peer_ring;
-	void**      peer_ring_buf;
-	ringlist_t  ringlist;
+    ring_t*     ring;
+    pring_t*    peer_ring;
+    void**      peer_ring_buf;
+    ringlist_t  ringlist;
 
-    int32_t     num_smp_procs;		// current number of smp procs on this host
-    int32_t     my_smp_rank;			// My SMP process rank.  Used for accessing
+    int32_t     num_smp_procs;          // current number of smp procs on this host
+    int32_t     my_smp_rank;                    // My SMP process rank.  Used for accessing
 };
 typedef struct mca_btl_nc_component_t mca_btl_nc_component_t;
 OMPI_MODULE_DECLSPEC extern mca_btl_nc_component_t mca_btl_nc_component;
@@ -529,4 +530,3 @@ int mca_btl_nc_ft_event(int state);
 END_C_DECLS
 
 #endif
-

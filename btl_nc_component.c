@@ -1,3 +1,4 @@
+/* -*- Mode: C; c-basic-offset:4 ; indent-tabs-mode:nil -*- */
 /*
  * Copyright (c) 2004-2011 The Trustees of Indiana University and Indiana
  *                         University Research and Technology
@@ -123,7 +124,7 @@ static int nc_register(void)
     mca_btl_nc.super.btl_rdma_pipeline_frag_size = MAX_MSG_SIZE;
     mca_btl_nc.super.btl_min_rdma_pipeline_size = MAX_MSG_SIZE;
 
-	mca_btl_nc.super.btl_flags = 0;
+    mca_btl_nc.super.btl_flags = 0;
 
     mca_btl_nc.super.btl_seg_size = sizeof(mca_btl_nc_segment_t);
     mca_btl_nc.super.btl_bandwidth = 12000;  /* Mbs */
@@ -153,13 +154,13 @@ static int mca_btl_nc_component_open(void)
 
 static int mca_btl_nc_component_close(void)
 {
-	if( (uint64_t)mca_btl_nc_component.sendthread ) {
+    if( (uint64_t)mca_btl_nc_component.sendthread ) {
 
-		mca_btl_nc_component.nodedesc->active = 0;
-		__sfence();
+        mca_btl_nc_component.nodedesc->active = 0;
+        __sfence();
 
-		pthread_join(mca_btl_nc_component.sendthread, 0);
-	}
+        pthread_join(mca_btl_nc_component.sendthread, 0);
+    }
 
     return OMPI_SUCCESS;
 }
@@ -205,84 +206,84 @@ mca_btl_base_module_t** mca_btl_nc_component_init(
 
 static void fifo_push_back(fifolist_t* list, frag_t* frag)
 {
-	frag->next = 0;
-	frag = (frag_t*)NODEADDR(frag);
+    frag->next = 0;
+    frag = (frag_t*)NODEADDR(frag);
 
-	__semlock(&list->lock);
+    __semlock(&list->lock);
 
-	if( list->head ) {
-		frag_t* tail = (frag_t*)PROCADDR(list->tail);
-		tail->next = frag;
-	}
-	else {
-		list->head = frag;
-	}
-	list->tail = frag;
+    if( list->head ) {
+        frag_t* tail = (frag_t*)PROCADDR(list->tail);
+        tail->next = frag;
+    }
+    else {
+        list->head = frag;
+    }
+    list->tail = frag;
 
-	__semunlock(&list->lock);
+    __semunlock(&list->lock);
 }
 
 
 static void processlist()
 {
-	fifolist_t* list = mca_btl_nc_component.myinq;
-	assert( list->head );
+    fifolist_t* list = mca_btl_nc_component.myinq;
+    assert( list->head );
 
-	frag_t* frag = list->head;
-	frag = (frag_t*)PROCADDR(frag);
+    frag_t* frag = list->head;
+    frag = (frag_t*)PROCADDR(frag);
 
-	if( frag->next ) {
-		list->head = frag->next;
-	}
-	else {
-		__semlock(&list->lock);
-		list->head = frag->next;
-		__semunlock(&list->lock);
-	}
+    if( frag->next ) {
+        list->head = frag->next;
+    }
+    else {
+        __semlock(&list->lock);
+        list->head = frag->next;
+        __semunlock(&list->lock);
+    }
 
-	void* src = frag + 1;
-	int size = frag->size;
-	int type = frag->msgtype;
+    void* src = frag + 1;
+    int size = frag->size;
+    int type = frag->msgtype;
 
-	processmsg(type, src, size);
+    processmsg(type, src, size);
 
-	freefrag(frag);
+    freefrag(frag);
 }
 
 
 int mca_btl_nc_component_progress(void)
 {
-	volatile fifolist_t* list = mca_btl_nc_component.myinq;
+    volatile fifolist_t* list = mca_btl_nc_component.myinq;
 
-	if( list->head ) {
-		processlist();
-		return 1;
-	}
+    if( list->head ) {
+        processlist();
+        return 1;
+    }
 
-	volatile node_t* nodedesc = mca_btl_nc_component.nodedesc;
-	ringlist_t* ringlist = &mca_btl_nc_component.ringlist;
+    volatile node_t* nodedesc = mca_btl_nc_component.nodedesc;
+    ringlist_t* ringlist = &mca_btl_nc_component.ringlist;
 
-	int ring_cnt = ringlist->cnt;
+    int ring_cnt = ringlist->cnt;
 
     if( nodedesc->ring_cnt > ring_cnt ) {
 
         for( int i = 0; i < MAX_GROUPS; i++ ) {
             if( nodedesc->inuse[i << 1] ) {
 
-			 	// check if ring is already in use
-				bool inuse = false;
-        	    ringdesc_t* r = ringlist->head;
-            	while( r ) {
-                	if( r->ndx == i ) {
-                    	inuse = true;
-	                    break;
-    	            }
-        	        r = r->next;
-            	}
+                // check if ring is already in use
+                bool inuse = false;
+                ringdesc_t* r = ringlist->head;
+                while( r ) {
+                    if( r->ndx == i ) {
+                        inuse = true;
+                        break;
+                    }
+                    r = r->next;
+                }
 
-	            if( !inuse ) {
-					// prepend to ringlist
- 					ringdesc_t* r = (ringdesc_t*)malloc(sizeof(ringdesc_t));
+                if( !inuse ) {
+                    // prepend to ringlist
+                    ringdesc_t* r = (ringdesc_t*)malloc(sizeof(ringdesc_t));
                     r->ring = mca_btl_nc_component.ring + i;
                     r->ringbuf = mca_btl_nc_component.shm_ringbase + (i * RING_SIZE);
                     r->ndx = i;
@@ -295,80 +296,80 @@ int mca_btl_nc_component_progress(void)
         }
     }
 
-	ringdesc_t* ringdesc = ringlist->head;
+    ringdesc_t* ringdesc = ringlist->head;
 
-	while( ringdesc ) {
-		__builtin_prefetch((void*)ringdesc->next);
+    while( ringdesc ) {
+        __builtin_prefetch((void*)ringdesc->next);
 
-		ring_t* ring = ringdesc->ring;
+        ring_t* ring = ringdesc->ring;
 
-		if( !__semtrylock(&ring->lock) ) {
-			ringdesc = ringdesc->next;
-			continue;
-		}
+        if( !__semtrylock(&ring->lock) ) {
+            ringdesc = ringdesc->next;
+            continue;
+        }
 
-		int sbit = ((ring->sbit) ^ 1);
-		uint32_t rtail = ring->tail;
-		rhdr_t* rhdr = (rhdr_t*)(ringdesc->ringbuf + rtail);
+        int sbit = ((ring->sbit) ^ 1);
+        uint32_t rtail = ring->tail;
+        rhdr_t* rhdr = (rhdr_t*)(ringdesc->ringbuf + rtail);
 
         int rndx = ringdesc->ndx;
 
-		for( ; ; ) {
+        for( ; ; ) {
 
-			int type = rhdr->type;
+            int type = rhdr->type;
 
-			if( (type & 1) != sbit ) {
+            if( (type & 1) != sbit ) {
 
-				// no message
-				int32_t z0 = ring->ttail;
-				int32_t z1 = (rtail >> (RING_SIZE_LOG2 - 2));
-				assert( z1 <= 3 ); // do 3 intermediate ring resets
-				if( z1 > z0 ) {
-					// reset remote tail
-					uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
-					__nccopy4(ptail, rtail);
-					ring->ttail = z1;
-				}
-				break;
-			}
-            
+                // no message
+                int32_t z0 = ring->ttail;
+                int32_t z1 = (rtail >> (RING_SIZE_LOG2 - 2));
+                assert( z1 <= 3 ); // do 3 intermediate ring resets
+                if( z1 > z0 ) {
+                    // reset remote tail
+                    uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
+                    __nccopy4(ptail, rtail);
+                    ring->ttail = z1;
+                }
+                break;
+            }
+
             assert( type );
-			type &= ~1;
-			int rsize = (rhdr->rsize << 2);
+            type &= ~1;
+            int rsize = (rhdr->rsize << 2);
 
-			if( type != MSG_TYPE_RST ) {
+            if( type != MSG_TYPE_RST ) {
 
-				assert( (rsize & 7) == 0 );
-				assert( rsize >= 16 );
+                assert( (rsize & 7) == 0 );
+                assert( rsize >= 16 );
 
-				bool local = (rhdr->dst_ndx == mca_btl_nc_component.cpuindex);
+                bool local = (rhdr->dst_ndx == mca_btl_nc_component.cpuindex);
 
-				bool done = false;
-				frag_t* frag;
+                bool done = false;
+                frag_t* frag;
 
-				int size8 = rsize - sizeof(rhdr_t);
-				int ssize = isyncsize(size8);
-				if( size8 > SHDR ) {
-					size8 -= ssize;
-				}
-				int size = size8 - rhdr->pad8;
+                int size8 = rsize - sizeof(rhdr_t);
+                int ssize = isyncsize(size8);
+                if( size8 > SHDR ) {
+                    size8 -= ssize;
+                }
+                int size = size8 - rhdr->pad8;
 
-				if( !(type & MSG_TYPE_BLK) ) {
-					frag = allocfrag(rsize);
-					if( !frag ) {
-						break;
-					}
+                if( !(type & MSG_TYPE_BLK) ) {
+                    frag = allocfrag(rsize);
+                    if( !frag ) {
+                        break;
+                    }
 
-					frag->msgtype = type;
-					frag->size = size;
+                    frag->msgtype = type;
+                    frag->size = size;
 
-					void* src = (void*)(rhdr + 1) + ssize;
-					void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
-					sbitreset(frag + 1, sbits, src, size8, sbit);
-					
-					done = true;
-				}
-				else {
+                    void* src = (void*)(rhdr + 1) + ssize;
+                    void* sbits = (size8 <= SHDR) ? (void*)&rhdr->sbits : (void*)(rhdr + 1);
+                    sbitreset(frag + 1, sbits, src, size8, sbit);
+
+                    done = true;
+                }
+                else {
                     frag = nodedesc->recvfrag[rndx];
 
                     if( !frag ) {
@@ -413,216 +414,217 @@ int mca_btl_nc_component_progress(void)
                     break;
                 }
                 rhdr = (rhdr_t*)((uint8_t*)rhdr + rsize);
-				break;
-			}
-			else {
-				// handle ring reset marker
-				// clear rest of ring
-				int n = RING_SIZE - rtail;
-				if( n > 0 ) {
-					memset8((uint8_t*)rhdr, sbit, n);
-				}
-				// use one cache line per counter
-				uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
-				__nccopy4(ptail, 0);
+                break;
+            }
+            else {
+                // handle ring reset marker
+                // clear rest of ring
+                int n = RING_SIZE - rtail;
+                if( n > 0 ) {
+                    memset8((uint8_t*)rhdr, sbit, n);
+                }
+                // use one cache line per counter
+                uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
+                __nccopy4(ptail, 0);
 
-				rtail = 0;
-				rhdr = (rhdr_t*)(ringdesc->ringbuf);
-				ring->ttail = 0;
-				ring->sbit = sbit;
-				sbit ^= 1;
-			}
-		}
+                rtail = 0;
+                rhdr = (rhdr_t*)(ringdesc->ringbuf);
+                ring->ttail = 0;
+                ring->sbit = sbit;
+                sbit ^= 1;
+            }
+        }
 
-		ring->tail = rtail;
-		__semunlock(&ring->lock);
+        ring->tail = rtail;
+        __semunlock(&ring->lock);
 
-		if( list->head ) {
-			break;
-		}
+        if( list->head ) {
+            break;
+        }
 
-		ringdesc = ringdesc->next;
-	}
+        ringdesc = ringdesc->next;
+    }
 
-	if( list->head ) {
-		processlist();
-		return 1;
-	}
-	return 0;
+    if( list->head ) {
+        processlist();
+        return 1;
+    }
+    return 0;
 }
 
 
 static void processmsg(int type, const void* src, int size)
 {
-	if( type == MSG_TYPE_ISEND ) {
-		struct {
-			mca_btl_base_descriptor_t base;
-    		mca_btl_base_segment_t hdr_payload;
-		} msg;
+    if( type == MSG_TYPE_ISEND ) {
+        struct {
+            mca_btl_base_descriptor_t base;
+            mca_btl_base_segment_t hdr_payload;
+        } msg;
 
-		msg.base.des_dst_cnt = 1;
-	    msg.base.des_dst = &(msg.hdr_payload);
-
-	    msg.hdr_payload.seg_addr.pval = (void*)src;
-		msg.hdr_payload.seg_len = size;
-
-    	static mca_btl_active_message_callback_t* mreg =
-				mca_btl_base_active_message_trigger + MCA_PML_OB1_HDR_TYPE_MATCH;
-
-	    mreg->cbfunc(&mca_btl_nc.super, MCA_PML_OB1_HDR_TYPE_MATCH,	&(msg.base), mreg->cbdata);
-	}
-	else
-	if( type == MSG_TYPE_FRAG ) {
-        mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)src;
-
-        mca_btl_nc_hdr_t msg;
-
-        msg.segment.base.seg_addr.pval = hdr + 1;
-        msg.segment.base.seg_len = hdr->segment.base.seg_len;
         msg.base.des_dst_cnt = 1;
-        msg.base.des_dst = &(msg.segment.base);
+        msg.base.des_dst = &(msg.hdr_payload);
 
-        mca_btl_active_message_callback_t* reg =
-                        mca_btl_base_active_message_trigger + hdr->tag;
+        msg.hdr_payload.seg_addr.pval = (void*)src;
+        msg.hdr_payload.seg_len = size;
 
-        reg->cbfunc(&mca_btl_nc.super, hdr->tag, &(msg.base), reg->cbdata);
+        static mca_btl_active_message_callback_t* mreg =
+            mca_btl_base_active_message_trigger + MCA_PML_OB1_HDR_TYPE_MATCH;
 
-        if( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags ) {
-			assert( hdr->self );
-	        sendack(hdr->src_rank, hdr->self);
-		}
-	}
-	else {
-		assert( type == MSG_TYPE_ACK );
+        mreg->cbfunc(&mca_btl_nc.super, MCA_PML_OB1_HDR_TYPE_MATCH, &(msg.base), mreg->cbdata);
+    }
+    else {
+        if( type == MSG_TYPE_FRAG ) {
+            mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)src;
 
-		frag_t* frag = *(frag_t**)src;
-		mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(frag + 1);
+            mca_btl_nc_hdr_t msg;
 
-        assert( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags );
+            msg.segment.base.seg_addr.pval = hdr + 1;
+            msg.segment.base.seg_len = hdr->segment.base.seg_len;
+            msg.base.des_dst_cnt = 1;
+            msg.base.des_dst = &(msg.segment.base);
 
-        hdr->base.des_cbfunc(&mca_btl_nc.super, hdr->endpoint, &hdr->base, OMPI_SUCCESS);
+            mca_btl_active_message_callback_t* reg =
+                mca_btl_base_active_message_trigger + hdr->tag;
 
-		freefrag(frag);
-	}
+            reg->cbfunc(&mca_btl_nc.super, hdr->tag, &(msg.base), reg->cbdata);
+
+            if( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags ) {
+                assert( hdr->self );
+                sendack(hdr->src_rank, hdr->self);
+            }
+        }
+        else {
+            assert( type == MSG_TYPE_ACK );
+
+            frag_t* frag = *(frag_t**)src;
+            mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(frag + 1);
+
+            assert( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags );
+
+            hdr->base.des_cbfunc(&mca_btl_nc.super, hdr->endpoint, &hdr->base, OMPI_SUCCESS);
+
+            freefrag(frag);
+        }
+    }
 }
 
 
 static void sbitreset(void* dst, const void* sbits, const void* src, int size8, int sbit)
 {
-	// pointer to workload
-	volatile uint64_t* p = (uint64_t*)src;
-	assert( ((uint64_t)p & 0x7) == 0 );
+    // pointer to workload
+    volatile uint64_t* p = (uint64_t*)src;
+    assert( ((uint64_t)p & 0x7) == 0 );
 
-	uint64_t* q = (uint64_t*)dst;
-	assert( ((uint64_t)q & 0x7) == 0 );
+    uint64_t* q = (uint64_t*)dst;
+    assert( ((uint64_t)q & 0x7) == 0 );
 
-	int n = (size8 >> 3);
+    int n = (size8 >> 3);
 
-	if( n <= 32 ) {
-		uint32_t b = *(uint32_t*)sbits;
-		b <<= (32 - n);
+    if( n <= 32 ) {
+        uint32_t b = *(uint32_t*)sbits;
+        b <<= (32 - n);
 
-		for( ; ; ) {
-			while( ((*p) & 1) != sbit ) {
-				__lfence();
-			}
-			if( b & (1ul << 31) ) {
-				(*q) = ((*p) | 1);
-			}
-			else {
-				(*q) = ((*p) & ~1);
-			}
+        for( ; ; ) {
+            while( ((*p) & 1) != sbit ) {
+                __lfence();
+            }
+            if( b & (1ul << 31) ) {
+                (*q) = ((*p) | 1);
+            }
+            else {
+                (*q) = ((*p) & ~1);
+            }
 
-			if( !--n ) {
-				break;
-			}
-			++p;
-			++q;
-			b <<= 1;
-		}
-	}
-	else {
-		// pointer to sync bits
-		volatile uint64_t* _sbits = (uint64_t*)sbits;
-		assert( ((uint64_t)_sbits & 0x7) == 0 );
+            if( !--n ) {
+                break;
+            }
+            ++p;
+            ++q;
+            b <<= 1;
+        }
+    }
+    else {
+        // pointer to sync bits
+        volatile uint64_t* _sbits = (uint64_t*)sbits;
+        assert( ((uint64_t)_sbits & 0x7) == 0 );
 
-		uint64_t b;
-		int k = 0;
+        uint64_t b;
+        int k = 0;
 
-		for( ; ; ) {
-			if( !k ) {
-				while( ((*_sbits) & 1) != sbit ) {
-					__lfence();
-				}
-				b = *_sbits++;
-				if( n >= 63 ) {
-					k = 63;
-				}
-				else {
-					k = n;
-					b <<= (63 - k);
-				}
-			}
-			while( ((*p) & 1) != sbit ) {
-				__lfence();
-			}
-			if( b & (1ull << 63) ) {
-				(*q) = ((*p) | 1);
-			}
-			else {
-				(*q) = ((*p) & ~1);
-			}
+        for( ; ; ) {
+            if( !k ) {
+                while( ((*_sbits) & 1) != sbit ) {
+                    __lfence();
+                }
+                b = *_sbits++;
+                if( n >= 63 ) {
+                    k = 63;
+                }
+                else {
+                    k = n;
+                    b <<= (63 - k);
+                }
+            }
+            while( ((*p) & 1) != sbit ) {
+                __lfence();
+            }
+            if( b & (1ull << 63) ) {
+                (*q) = ((*p) | 1);
+            }
+            else {
+                (*q) = ((*p) & ~1);
+            }
 
-			if( !--n ) {
-				break;
-			}
+            if( !--n ) {
+                break;
+            }
 
-			++p;
-			++q;
-			--k;
-			b <<= 1;
-		}
-	}
+            ++p;
+            ++q;
+            --k;
+            b <<= 1;
+        }
+    }
 }
 
 
 static void memcpy8(void* to, const void* from, int n)
 {
     assert( n > 0 );
-	assert( (n & 0x7) == 0 );
-	assert( (((uint64_t)from) & 0x7) == 0 );
-	assert( (((uint64_t)to) & 0x7) == 0 );
+    assert( (n & 0x7) == 0 );
+    assert( (((uint64_t)from) & 0x7) == 0 );
+    assert( (((uint64_t)to) & 0x7) == 0 );
 
-	__asm__ __volatile__ (
-		"movl %0, %%ecx\n"
-		"shr  $3, %%ecx\n"
-		"movq %1, %%rsi\n"
-		"movq %2, %%rdi\n"
-		"1:\n"
-		"movq (%%rsi), %%rax\n"
-		"movq %%rax, (%%rdi)\n"
-		"addq $8, %%rsi\n"
-		"addq $8, %%rdi\n"
-		"loop 1b\n"
-	    : : "r" (n), "r" (from), "r" (to) : "ecx", "rax", "rsi", "rdi", "memory");
+    __asm__ __volatile__ (
+        "movl %0, %%ecx\n"
+        "shr  $3, %%ecx\n"
+        "movq %1, %%rsi\n"
+        "movq %2, %%rdi\n"
+        "1:\n"
+        "movq (%%rsi), %%rax\n"
+        "movq %%rax, (%%rdi)\n"
+        "addq $8, %%rsi\n"
+        "addq $8, %%rdi\n"
+        "loop 1b\n"
+        : : "r" (n), "r" (from), "r" (to) : "ecx", "rax", "rsi", "rdi", "memory");
 }
 
 
 static void memset8(void* to, uint64_t val, int n)
 {
     assert( n > 0 );
-	assert( (n & 0x7) == 0 );
-	assert( (((uint64_t)to) & 0x7) == 0 );
+    assert( (n & 0x7) == 0 );
+    assert( (((uint64_t)to) & 0x7) == 0 );
 
-	__asm__ __volatile__ (
-		"movl %0, %%ecx\n"
-		"shr  $3, %%ecx\n"
-		"movq %1, %%rax\n"
-		"movq %2, %%rdi\n"
-		"1:\n"
-		"movnti %%rax, (%%rdi)\n"
-		"addq $8, %%rdi\n"
-		"loop 1b\n"
-		"sfence\n"
-	    : : "r" (n), "r" (val), "r" (to) : "ecx", "rax", "rdi", "memory");
+    __asm__ __volatile__ (
+        "movl %0, %%ecx\n"
+        "shr  $3, %%ecx\n"
+        "movq %1, %%rax\n"
+        "movq %2, %%rdi\n"
+        "1:\n"
+        "movnti %%rax, (%%rdi)\n"
+        "addq $8, %%rdi\n"
+        "loop 1b\n"
+        "sfence\n"
+        : : "r" (n), "r" (val), "r" (to) : "ecx", "rax", "rdi", "memory");
 }
