@@ -59,6 +59,7 @@ BEGIN_C_DECLS
 #define MAX_NUMA_NODES 256
 #define MAX_GROUPS 256
 #define MAX_PROCS 4096
+#define MAX_P2P    256
 
 #define MAX_EAGER_SIZE (4 * 1024)
 #define MAX_SEND_SIZE  (16 * 1024)
@@ -74,8 +75,8 @@ BEGIN_C_DECLS
 
 #define INTRA_GROUP_NUMA_DIST 10
 
-#define RING_SIZE (64 * 1024)
-#define RING_SIZE_LOG2 (16)
+#define RING_SIZE (256 * 1024)
+#define RING_SIZE_LOG2 (18)
 
 #define SEMLOCK_UNLOCKED 0
 #define SEMLOCK_LOCKED 1
@@ -119,12 +120,6 @@ static void forceinline __semunlock(volatile int32_t* v)
     __asm__ __volatile__ (
         "movl $0, (%0)\n"
         : : "r" (v) : "memory");
-}
-
-
-static inline int32_t lockedAdd(volatile int32_t* v, int val)
-{
-    return (int32_t)__sync_add_and_fetch(v, val);
 }
 
 
@@ -252,24 +247,12 @@ struct msgstats_t {
 
 typedef struct ring {
     volatile int32_t lock;
-    uint32_t         tail;  // read tail
-    int32_t          sbit;  // sync bit
-    int32_t          ttail; // ring reset flag
+    uint32_t tail;    // read tail
+    int32_t  sbit;    // sync bit
+    int32_t  ttail;   // ring reset flag
+    int32_t  ndx;     // ring index
+    int32_t  pad[11]; // padding
 } ring_t;
-
-
-typedef struct ringdesc {
-    ring_t*          ring;
-    void*            ringbuf;
-    int32_t          ndx;
-    struct ringdesc* next;
-} ringdesc_t;
-
-
-typedef struct ringlist {
-    int32_t     cnt;
-    ringdesc_t* head;
-} ringlist_t;
 
 
 typedef struct {
@@ -277,23 +260,24 @@ typedef struct {
     bool             commited;
     uint32_t         head;
     int32_t          sbit;
+    int32_t          pad[12];
 } pring_t;
 
 
 typedef struct {
     uint32_t         stail[MAX_GROUPS];
+    ring_t           ring[MAX_GROUPS];
+    int32_t          ring_cnt ALIGN8;
     volatile int32_t fraglock ALIGN8;
     int32_t*         sendqcnt ALIGN8;
-    int32_t          ring_cnt ALIGN8;
-    bool             inuse[MAX_GROUPS * 2];
     volatile bool    active;
-    pthread_cond_t   send_cond;
-    pthread_mutex_t  send_mutex;
+    pthread_cond_t	 send_cond ALIGN8;
+    pthread_mutex_t	 send_mutex ALIGN8;
     void*            shm_base;
-    void*            shm_frags;             // base of frags in shared mem
+    void*	         shm_frags;		// base of frags in shared mem
     frag_t*          recvfrag[MAX_GROUPS];
     // !must be last member
-    int32_t          ndxmax ALIGN8; // max peer index on local node
+    int32_t          ndxmax ALIGN8;	// max peer index on local node
 } node_t;
 
 
@@ -321,6 +305,8 @@ struct mca_btl_nc_component_t {
     int32_t     group;
     int32_t     cpuindex;
     int         statistics;                 // create statistics
+    int         shared_queues;
+    int         async_send;
     int         grp_numa_dist;              // size of group in terms of numa distance
     uint8_t*    shm_stat;                   // statistics buffer
     fifolist_t* pending_sends;
@@ -347,11 +333,8 @@ struct mca_btl_nc_component_t {
     uint64_t    shm_ofs;
     uint64_t    ring_ofs;
     uint64_t    frag_ofs;
-
-    ring_t*     ring;
     pring_t*    peer_ring;
     void**      peer_ring_buf;
-    ringlist_t  ringlist;
 
     int32_t     num_smp_procs;          // current number of smp procs on this host
     int32_t     my_smp_rank;                    // My SMP process rank.  Used for accessing
@@ -376,6 +359,7 @@ OMPI_MODULE_DECLSPEC extern mca_btl_nc_t mca_btl_nc;
  * shared memory component progress.
  */
 extern int mca_btl_nc_component_progress(void);
+extern void send_pending();
 
 
 /**

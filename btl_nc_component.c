@@ -134,6 +134,20 @@ static int nc_register(void)
     mca_btl_base_param_register(&mca_btl_nc_component.super.btl_version,
                                 &mca_btl_nc.super);
 
+    mca_btl_nc_component.async_send = 0;
+    mca_base_component_var_register(&mca_btl_nc_component.super.btl_version,
+                                    "send_thread", "Whether or not to enable asynchronously send threads",
+                                    MCA_BASE_VAR_TYPE_UNSIGNED_INT, NULL, 0, 0,
+                                    OPAL_INFO_LVL_9, MCA_BASE_VAR_SCOPE_READONLY,
+                                    &mca_btl_nc_component.async_send);
+
+    mca_btl_nc_component.shared_queues = -1;
+    mca_base_component_var_register(&mca_btl_nc_component.super.btl_version,
+                                    "shared_queues", "Whether or not to enable shared queues",
+                                    MCA_BASE_VAR_TYPE_UNSIGNED_INT, NULL, 0, 0,
+                                    OPAL_INFO_LVL_9, MCA_BASE_VAR_SCOPE_READONLY,
+                                    &mca_btl_nc_component.shared_queues);
+
     return mca_btl_nc_component_verify();
 }
 
@@ -260,59 +274,26 @@ int mca_btl_nc_component_progress(void)
         return 1;
     }
 
+    bool qshared = mca_btl_nc_component.shared_queues;
     volatile node_t* nodedesc = mca_btl_nc_component.nodedesc;
-    ringlist_t* ringlist = &mca_btl_nc_component.ringlist;
+    volatile ring_t* ring = nodedesc->ring;
+    int ring_cnt = (int)nodedesc->ring_cnt;
+    void* ring_base = mca_btl_nc_component.shm_ringbase;
 
-    int ring_cnt = ringlist->cnt;
+    for( int i = 0; i < ring_cnt; i++ ) {
 
-    if( nodedesc->ring_cnt > ring_cnt ) {
+//	__builtin_prefetch((void*)(ring + 1));
 
-        for( int i = 0; i < MAX_GROUPS; i++ ) {
-            if( nodedesc->inuse[i << 1] ) {
+        int rndx = ring->ndx - 1;
 
-                // check if ring is already in use
-                bool inuse = false;
-                ringdesc_t* r = ringlist->head;
-                while( r ) {
-                    if( r->ndx == i ) {
-                        inuse = true;
-                        break;
-                    }
-                    r = r->next;
-                }
-
-                if( !inuse ) {
-                    // prepend to ringlist
-                    ringdesc_t* r = (ringdesc_t*)malloc(sizeof(ringdesc_t));
-                    r->ring = mca_btl_nc_component.ring + i;
-                    r->ringbuf = mca_btl_nc_component.shm_ringbase + (i * RING_SIZE);
-                    r->ndx = i;
-
-                    r->next = ringlist->head;
-                    ringlist->head = r;
-                    ++ringlist->cnt;
-                }
-            }
-        }
-    }
-
-    ringdesc_t* ringdesc = ringlist->head;
-
-    while( ringdesc ) {
-        __builtin_prefetch((void*)ringdesc->next);
-
-        ring_t* ring = ringdesc->ring;
-
-        if( !__semtrylock(&ring->lock) ) {
-            ringdesc = ringdesc->next;
+        if( (rndx < 0) || (qshared && !__semtrylock(&ring->lock)) ) {
+            ++ring;
             continue;
         }
 
         int sbit = ((ring->sbit) ^ 1);
         uint32_t rtail = ring->tail;
-        rhdr_t* rhdr = (rhdr_t*)(ringdesc->ringbuf + rtail);
-
-        int rndx = ringdesc->ndx;
+        volatile rhdr_t* rhdr = (rhdr_t*)(ring_base + (rndx << RING_SIZE_LOG2) + rtail);
 
         for( ; ; ) {
 
@@ -373,6 +354,7 @@ int mca_btl_nc_component_progress(void)
                     frag = nodedesc->recvfrag[rndx];
 
                     if( !frag ) {
+                        // rhdr->sbits is used in blocked messages to store the total length
                         int bufsize = sizeof(rhdr) + ((rhdr->sbits + 7) & ~7);
 
                         frag = allocfrag(bufsize);
@@ -428,7 +410,8 @@ int mca_btl_nc_component_progress(void)
                 __nccopy4(ptail, 0);
 
                 rtail = 0;
-                rhdr = (rhdr_t*)(ringdesc->ringbuf);
+                rhdr = (rhdr_t*)(ring_base + (rndx << RING_SIZE_LOG2));
+
                 ring->ttail = 0;
                 ring->sbit = sbit;
                 sbit ^= 1;
@@ -442,13 +425,18 @@ int mca_btl_nc_component_progress(void)
             break;
         }
 
-        ringdesc = ringdesc->next;
+        ++ring;
     }
 
     if( list->head ) {
         processlist();
         return 1;
     }
+
+    if( !mca_btl_nc_component.async_send &&  mca_btl_nc_component.pending_sends->head ) {
+        send_pending();
+    }
+
     return 0;
 }
 
