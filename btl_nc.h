@@ -269,7 +269,7 @@ typedef struct {
     ring_t           ring[MAX_GROUPS];
     int32_t          ring_cnt ALIGN8;
     volatile int32_t fraglock ALIGN8;
-    int32_t*         sendqcnt ALIGN8;
+//    int32_t*         sendqcnt ALIGN8;
     volatile bool    active;
     pthread_cond_t	 send_cond ALIGN8;
     pthread_mutex_t	 send_mutex ALIGN8;
@@ -359,7 +359,8 @@ OMPI_MODULE_DECLSPEC extern mca_btl_nc_t mca_btl_nc;
  * shared memory component progress.
  */
 extern int mca_btl_nc_component_progress(void);
-extern void send_pending();
+extern void send_pending_p2p();
+extern void send_pending_sharedq();
 
 
 /**

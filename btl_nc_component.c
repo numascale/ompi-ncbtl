@@ -433,8 +433,13 @@ int mca_btl_nc_component_progress(void)
         return 1;
     }
 
-    if( !mca_btl_nc_component.async_send &&  mca_btl_nc_component.pending_sends->head ) {
-        send_pending();
+    if( !mca_btl_nc_component.async_send && mca_btl_nc_component.pending_sends->head ) {
+		if( mca_btl_nc_component.shared_queues ) {
+			send_pending_sharedq();
+		}
+		else {
+			send_pending_p2p();
+		}
     }
 
     return 0;
