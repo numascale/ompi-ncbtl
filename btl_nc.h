@@ -49,34 +49,31 @@ BEGIN_C_DECLS
 #define MSG_TYPE_ISEND 0x02
 #define MSG_TYPE_FRAG  0x04
 #define MSG_TYPE_ACK   0x06
-#define MSG_TYPE_BLKN  0x08
-#define MSG_TYPE_BLK   0x18
-#define MSG_TYPE_RST   0x20
+#define MSG_TYPE_BLK   0x08
+#define MSG_TYPE_RST   0x10
 
 
 #define NC_CLSIZE (64)    // cache line size
 
-#define MAX_NUMA_NODES 256
-#define MAX_GROUPS 256
-#define MAX_PROCS 4096
-#define MAX_P2P    256
+#define MAX_NUMA_NODES 1024
+#define MAX_GROUPS	   4096
+#define MAX_PROCS	   4096
+#define MAX_P2P         256
 
-#define MAX_EAGER_SIZE (4 * 1024)
+#define MAX_EAGER_SIZE (15 * 1024)
 #define MAX_SEND_SIZE  (16 * 1024)
-#define MAX_MSG_SIZE   (16 * 1024 * 1024)
-#define MAX_SIZE_FRAGS (1024 * 1024 * 1024)
+#define MAX_MSG_SIZE   (64 * 1024 * 1024)
+#define MAX_SIZE_FRAGS (64 * 1024 * 1024)
 
 #define FRAG_SIZE 48
 #define RHDR_SIZE 8
-#define SHDR      256
 
-#define syncsize(s) ((s <= SHDR) ? 0 : ((((s >> 3) + 62) / 63) << 3))
-#define isyncsize(s) ((s <= SHDR) ? 0 : (((s - 16) >> 9) + 1) << 3)
+#define syncsize(s) ((((s - 256) + 503) / 504) << 3) // size for sending synchronization bits
 
 #define INTRA_GROUP_NUMA_DIST 10
 
-#define RING_SIZE (256 * 1024)
-#define RING_SIZE_LOG2 (18)
+#define RING_SIZE (64 * 1024)
+#define RING_SIZE_LOG2 (16)
 
 #define SEMLOCK_UNLOCKED 0
 #define SEMLOCK_LOCKED 1
@@ -87,6 +84,12 @@ BEGIN_C_DECLS
 
 #define NODEADDR(ptr) ((void*)ptr - mca_btl_nc_component.shm_ofs)
 #define PROCADDR(ptr) ((void*)ptr + mca_btl_nc_component.shm_ofs)
+
+
+static int32_t inline lockedAdd(volatile int32_t* v, int val)
+{
+    return (int32_t)__sync_add_and_fetch(v, val);
+}
 
 
 static void forceinline __semlock(volatile int32_t* v)
@@ -167,10 +170,8 @@ static void forceinline __nccopy8(void* to, const void* from)
 typedef struct {
     uint32_t type    : 6;  // sync bit and message type
     uint32_t dst_ndx : 6;  // destination cpu index in group sharing ring
-    uint32_t rsize   : 16; // size in ring
-    uint32_t pad8    : 3;  // padding bytes used for 8 bytes alignment
-    uint32_t unused  : 1;  // unused
-    uint32_t sbits;                // synchronization bits
+    uint32_t size    : 20; // message size
+    uint32_t sbits;		   // synchronization bits
 } rhdr_t;
 
 
@@ -199,17 +200,17 @@ struct fifolist; // forward declaration
  * message fragment
  */
 typedef struct frag {
-    int32_t      fsize;         // frag size
+    int32_t      fsize;     // frag size
     bool         inuse;     // fragment is in use
-    int32_t      size;          // message body size including mpi headers
-    int32_t      prevsize;      // previous frag size
-    int32_t      peer;
+    int32_t      size;      // message body size including mpi headers
+    int32_t      prevsize;  // previous frag size
+    int32_t      peer;		// target peer
     int32_t      node;      // target node
-    int32_t      ofs;           // offset of data already procesed
-    int32_t      rsize;     // total size in ring
+    int32_t      send;      // bytes send
     bool         lastfrag;  // last frag in pool
-    int32_t      msgtype;
-    struct frag* next;          // next in list, next in pool is determined by size
+    int32_t      msgtype;	// message type
+    int32_t      pad;	    // padding
+    struct frag* next;      // next in list, next in pool is determined by size
 } frag_t;
 
 
@@ -228,9 +229,9 @@ struct mca_btl_nc_hdr_t {
     mca_btl_nc_segment_t            segment;
     struct mca_btl_base_endpoint_t* endpoint;
     mca_btl_base_tag_t              tag;
-    int32_t                         reserve;
+	int32_t						    size;
     int32_t                         src_rank;
-    frag_t*                         self;
+    frag_t*                         frag;
 };
 typedef struct mca_btl_nc_hdr_t mca_btl_nc_hdr_t;
 
@@ -269,7 +270,6 @@ typedef struct {
     ring_t           ring[MAX_GROUPS];
     int32_t          ring_cnt ALIGN8;
     volatile int32_t fraglock ALIGN8;
-//    int32_t*         sendqcnt ALIGN8;
     volatile bool    active;
     pthread_cond_t	 send_cond ALIGN8;
     pthread_mutex_t	 send_mutex ALIGN8;
@@ -288,6 +288,7 @@ typedef struct {
     int      node_count;
     int      rank_count;
     int      num_smp_procs;
+    size_t   ring_ofs[MAX_PROCS];
     uint32_t map[MAX_PROCS]; // (group | cpuindex)
     uint32_t cpuid[MAX_PROCS];
     int32_t  group[MAX_NUMA_NODES];
@@ -326,13 +327,10 @@ struct mca_btl_nc_component_t {
     node_t**    peer_node;
     node_t*     nodedesc;
 
-    uint64_t    shmsize;
     void*       shm_base;
     void*       shm_ringbase;
     void*       shm_fragbase;
     uint64_t    shm_ofs;
-    uint64_t    ring_ofs;
-    uint64_t    frag_ofs;
     pring_t*    peer_ring;
     void**      peer_ring_buf;
 
@@ -359,8 +357,8 @@ OMPI_MODULE_DECLSPEC extern mca_btl_nc_t mca_btl_nc;
  * shared memory component progress.
  */
 extern int mca_btl_nc_component_progress(void);
-extern void send_pending_p2p();
-extern void send_pending_sharedq();
+extern void send_sync_p2p();
+extern void send_sync_sharedq();
 
 
 /**
