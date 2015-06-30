@@ -56,8 +56,8 @@ BEGIN_C_DECLS
 #define NC_CLSIZE (64)    // cache line size
 
 #define MAX_NUMA_NODES 1024
-#define MAX_GROUPS	   4096
-#define MAX_PROCS	   4096
+#define MAX_GROUPS         4096
+#define MAX_PROCS          4096
 #define MAX_P2P         256
 
 #define MAX_EAGER_SIZE (15 * 1024)
@@ -171,7 +171,7 @@ typedef struct {
     uint32_t type    : 6;  // sync bit and message type
     uint32_t dst_ndx : 6;  // destination cpu index in group sharing ring
     uint32_t size    : 20; // message size
-    uint32_t sbits;		   // synchronization bits
+    uint32_t sbits;                // synchronization bits
 } rhdr_t;
 
 
@@ -204,12 +204,12 @@ typedef struct frag {
     bool         inuse;     // fragment is in use
     int32_t      size;      // message body size including mpi headers
     int32_t      prevsize;  // previous frag size
-    int32_t      peer;		// target peer
+    int32_t      peer;          // target peer
     int32_t      node;      // target node
     int32_t      send;      // bytes send
     bool         lastfrag;  // last frag in pool
-    int32_t      msgtype;	// message type
-    int32_t      pad;	    // padding
+    int32_t      msgtype;       // message type
+    int32_t      pad;       // padding
     struct frag* next;      // next in list, next in pool is determined by size
 } frag_t;
 
@@ -229,7 +229,7 @@ struct mca_btl_nc_hdr_t {
     mca_btl_nc_segment_t            segment;
     struct mca_btl_base_endpoint_t* endpoint;
     mca_btl_base_tag_t              tag;
-	int32_t						    size;
+    int32_t                         size;
     int32_t                         src_rank;
     frag_t*                         frag;
 };
@@ -271,13 +271,13 @@ typedef struct {
     int32_t          ring_cnt ALIGN8;
     volatile int32_t fraglock ALIGN8;
     volatile bool    active;
-    pthread_cond_t	 send_cond ALIGN8;
-    pthread_mutex_t	 send_mutex ALIGN8;
+    pthread_cond_t       send_cond ALIGN8;
+    pthread_mutex_t      send_mutex ALIGN8;
     void*            shm_base;
-    void*	         shm_frags;		// base of frags in shared mem
+    void*                shm_frags;             // base of frags in shared mem
     frag_t*          recvfrag[MAX_GROUPS];
     // !must be last member
-    int32_t          ndxmax ALIGN8;	// max peer index on local node
+    int32_t          ndxmax ALIGN8;     // max peer index on local node
 } node_t;
 
 

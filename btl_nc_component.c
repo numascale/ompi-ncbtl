@@ -279,7 +279,7 @@ int mca_btl_nc_component_progress(void)
 
     for( int i = 0; i < ring_cnt; i++ ) {
 
-//	__builtin_prefetch((void*)(ring + 1));
+//      __builtin_prefetch((void*)(ring + 1));
 
         int rndx = ring->ndx - 1;
 
@@ -288,7 +288,7 @@ int mca_btl_nc_component_progress(void)
             continue;
         }
 
-	    ring_t* r = (ring_t*)ring;
+        ring_t* r = (ring_t*)ring;
 
         int sbit = ((r->sbit) ^ 1);
         uint32_t rtail = r->tail;
@@ -331,7 +331,7 @@ int mca_btl_nc_component_progress(void)
 
                     frag->msgtype = type;
                     frag->size = size;
-					frag->send = size;
+                                        frag->send = size;
 
                     read_msg(frag + 1, r, (rhdr_t*)rhdr, sbit);
                     done = true;
@@ -339,22 +339,22 @@ int mca_btl_nc_component_progress(void)
                 else {
                     frag = nodedesc->recvfrag[rndx];
                     if( !frag ) {
-						// frag is first chunk of a multi chunk message
+                        // frag is first chunk of a multi chunk message
 
-						mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(rhdr + 1);
+                        mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(rhdr + 1);
 
-						volatile uint64_t* p = (uint64_t*)(rhdr + 1);
-						int n = sizeof(mca_btl_nc_hdr_t);
-						n = (((n + 7) & ~7) >> 3);
-						for( int i = 0; i < n; i++ ) {
-							while( ((*p) & 1) != sbit ) {
-								__asm__ __volatile__ ("pause");
-       						}
-							++p;
-						}
+                        volatile uint64_t* p = (uint64_t*)(rhdr + 1);
+                        int n = sizeof(mca_btl_nc_hdr_t);
+                        n = (((n + 7) & ~7) >> 3);
+                        for( int i = 0; i < n; i++ ) {
+                            while( ((*p) & 1) != sbit ) {
+                                __asm__ __volatile__ ("pause");
+                            }
+                            ++p;
+                        }
 
-						int totSize = hdr->size;
-						totSize &= ~1;
+                        int totSize = hdr->size;
+                        totSize &= ~1;
 
                         frag = allocfrag(totSize);
                         if( !frag ) {
@@ -363,7 +363,7 @@ int mca_btl_nc_component_progress(void)
 
                         nodedesc->recvfrag[rndx] = (void*)NODEADDR(frag);
                         frag->size = 0;
-						frag->send = totSize;
+                        frag->send = totSize;
                     }
                     else {
                         frag = nodedesc->recvfrag[rndx];
@@ -373,7 +373,7 @@ int mca_btl_nc_component_progress(void)
 
                     void* dst = (void*)(frag + 1) + frag->size;
                     frag->size += size;
-					assert( frag->size <= frag->send );
+                    assert( frag->size <= frag->send );
 
                     read_msg(dst, r, (rhdr_t*)rhdr, sbit);
 
@@ -433,12 +433,12 @@ int mca_btl_nc_component_progress(void)
         return 1;
     }
     if( !mca_btl_nc_component.async_send && mca_btl_nc_component.pending_sends->head ) {
-		if( qshared ) {
-			send_sync_sharedq();
-		}
-		else {
-			send_sync_p2p();
-		}
+        if( qshared ) {
+            send_sync_sharedq();
+        }
+        else {
+            send_sync_p2p();
+        }
     }
     return 0;
 }
@@ -494,13 +494,13 @@ static void processmsg(frag_t* frag)
     else {
         assert( type == MSG_TYPE_ACK );
 
-		// sender fragment
+                // sender fragment
         frag_t* sfrag = *(frag_t**)(frag + 1);
 
-		mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(sfrag + 1);
-		if( sfrag->send >= 0 ) {
-			hdr = (mca_btl_nc_hdr_t*)((void*)hdr + RHDR_SIZE);
-		}
+        mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(sfrag + 1);
+        if( sfrag->send >= 0 ) {
+            hdr = (mca_btl_nc_hdr_t*)((void*)hdr + RHDR_SIZE);
+        }
 
         if( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags ) {
             hdr->base.des_cbfunc(&mca_btl_nc.super, hdr->endpoint, &hdr->base, OMPI_SUCCESS);
@@ -514,102 +514,102 @@ static void processmsg(frag_t* frag)
 
 static void rcopy(void* dst, volatile void* src, int size, int sbit)
 {
-	assert( ((uint64_t)dst & 0x3) == 0 );
-	assert( ((uint64_t)src & 0x3) == 0 );
-	assert( (size > 0) && ((size & 7) == 0) );
-	assert( (sbit == 0) || (sbit == 1) );
+    assert( ((uint64_t)dst & 0x3) == 0 );
+    assert( ((uint64_t)src & 0x3) == 0 );
+    assert( (size > 0) && ((size & 7) == 0) );
+    assert( (sbit == 0) || (sbit == 1) );
 
-	volatile uint64_t* p = (uint64_t*)src;
-	uint64_t* q = (uint64_t*)dst;
+    volatile uint64_t* p = (uint64_t*)src;
+    uint64_t* q = (uint64_t*)dst;
 
-	int n = (size >> 3);
+    int n = (size >> 3);
 
-	while( n ) {
+    while( n ) {
 
-		int k = n;
-		if( k > 63 ) {
-			k = 63;
-		}
-
-        for( int i = 0; i < k; i++ ) {
-      		// wait until receive completed
-        	while( ((*p) & 1) != sbit ) {
-	        	__asm__ __volatile__ ("pause");
-       		}
-    		*q++ = *p++;
+        int k = n;
+        if( k > 63 ) {
+            k = 63;
         }
 
-		// wait until receive completed
-      	while( ((*p) & 1) != sbit ) {
-	    	__asm__ __volatile__ ("pause");
-		}
-    	uint64_t b = *p++;
+        for( int i = 0; i < k; i++ ) {
+            // wait until receive completed
+            while( ((*p) & 1) != sbit ) {
+                __asm__ __volatile__ ("pause");
+            }
+            *q++ = *p++;
+        }
+
+        // wait until receive completed
+        while( ((*p) & 1) != sbit ) {
+            __asm__ __volatile__ ("pause");
+        }
+        uint64_t b = *p++;
         b >>= 1;
 
-		uint64_t* q0 = q;
+        uint64_t* q0 = q;
 
-		// restore lsb bits from b
-		for( int i = 0; i < k; i++ ) {
-			uint64_t z = *--q0;
-			z >>= 1;
-			z <<= 1;
-			z |= (b & 1);
+        // restore lsb bits from b
+        for( int i = 0; i < k; i++ ) {
+            uint64_t z = *--q0;
+            z >>= 1;
+            z <<= 1;
+            z |= (b & 1);
             b >>= 1;
-    		*q0 = z;
-		}
+            *q0 = z;
+        }
 
         n -= k;
-	}
+    }
 }
 
 
 static void read_msg(void* dst, ring_t* r, const rhdr_t* rhdr, int sbit)
 {
-	assert( ((uint64_t)rhdr & 0x7) == 0 );
-	assert( ((uint64_t)dst & 0x3) == 0 );
+    assert( ((uint64_t)rhdr & 0x7) == 0 );
+    assert( ((uint64_t)dst & 0x3) == 0 );
 
     int size8 = ((rhdr->size + 7) & ~7);
 
-	volatile uint64_t* p = (uint64_t*)(rhdr + 1);
-	uint64_t* q = (uint64_t*)dst;
+    volatile uint64_t* p = (uint64_t*)(rhdr + 1);
+    uint64_t* q = (uint64_t*)dst;
 
-	int n = (size8 >> 3);
+    int n = (size8 >> 3);
 
     if( n ) {
 
-		int k = n;
-		if( k > 32 ) {
-			k = 32;
-		}
+        int k = n;
+        if( k > 32 ) {
+            k = 32;
+        }
 
-		// restore lsb bits from b
-		uint64_t b = rhdr->sbits;
+        // restore lsb bits from b
+        uint64_t b = rhdr->sbits;
 
-		for( int i = 0; i < k; i++ ) {
-      		// wait until receive completed
-			while( ((*p) & 1) != sbit ) {
-				__asm__ __volatile__ ("pause");
-       		}
-    		*q++ = *p++;
-		}
+        for( int i = 0; i < k; i++ ) {
+            // wait until receive completed
+            while( ((*p) & 1) != sbit ) {
+                __asm__ __volatile__ ("pause");
+            }
+            *q++ = *p++;
+        }
 
-		uint64_t* q0 = q;
+        uint64_t* q0 = q;
 
-		for( int i = 0; i < k; i++ ) {
-			uint64_t z = *--q0;
-			z >>= 1;
-			z <<= 1;
-			z |= (b & 1);
-			b >>= 1;
-    		*q0 = z;
-		}
+        for( int i = 0; i < k; i++ ) {
+            uint64_t z = *--q0;
+            z >>= 1;
+            z <<= 1;
+            z |= (b & 1);
+            b >>= 1;
+            *q0 = z;
+        }
 
-		size8 -= 256;
+        size8 -= 256;
 
-		if( size8 > 0 ) {
-			rcopy(q, p, size8, sbit);
-		}
-	}
+        if( size8 > 0 ) {
+            rcopy(q, p, size8, sbit);
+        }
+    }
 }
 
 
