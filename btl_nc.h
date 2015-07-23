@@ -63,7 +63,7 @@ BEGIN_C_DECLS
 #define MAX_EAGER_SIZE (15 * 1024)
 #define MAX_SEND_SIZE  (16 * 1024)
 #define MAX_MSG_SIZE   (64 * 1024 * 1024)
-#define MAX_SIZE_FRAGS (64 * 1024 * 1024)
+#define MAX_SIZE_FRAGS (1024 * 1024 * 1024)
 
 #define FRAG_SIZE 48
 #define RHDR_SIZE 8
@@ -99,7 +99,10 @@ static void forceinline __semlock(volatile int32_t* v)
         "1:\n"
         "xorl %%eax, %%eax\n"
         "lock cmpxchgl %%ebx, %0\n"
-        "jnz 1b\n"
+        "jz 2f\n"
+        "pause\n"
+        "jmp 1b\n"
+        "2:\n"
         : "+m" (*v) : : "eax", "ebx", "memory");
 }
 

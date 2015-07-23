@@ -259,9 +259,6 @@ static void processlist()
 }
 
 
-static int nn = 0;
-
-
 int mca_btl_nc_component_progress(void)
 {
     volatile fifolist_t* list = mca_btl_nc_component.myinq;
@@ -484,17 +481,22 @@ static void processmsg(frag_t* frag)
 
         reg->cbfunc(&mca_btl_nc.super, hdr->tag, &(msg.base), reg->cbdata);
 
+        bool ring_frag = (frag->send >= 0);
+
         assert( hdr->frag );
         sendack(hdr->src_rank, hdr->frag);
 
-        if( frag->send >= 0 ) {
+        // if fragment was allocated in receive from ring then
+        // deallocate it here. otherwise it was alocated by sender and
+        // will be deallocated after ack message on sender side
+        if( ring_frag ) {
             freefrag(frag);
         }
     }
     else {
         assert( type == MSG_TYPE_ACK );
 
-                // sender fragment
+        // sender fragment
         frag_t* sfrag = *(frag_t**)(frag + 1);
 
         mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(sfrag + 1);

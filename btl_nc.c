@@ -578,8 +578,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
         frag->fsize = MAX_SIZE_FRAGS;
         frag->lastfrag = true;
 
-        if( mca_btl_nc_component.async_send || mca_btl_nc_component.shared_queues ) {
-
+        if( mca_btl_nc_component.async_send ) {
             pthread_mutex_t* sendq_mutex = &nodedesc->send_mutex;
             pthread_mutexattr_t mutex_attr;
             pthread_mutexattr_init(&mutex_attr);
@@ -587,9 +586,6 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
                 pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
             }
             pthread_mutex_init(sendq_mutex, &mutex_attr);
-        }
-
-        if( mca_btl_nc_component.async_send ) {
             pthread_create(&mca_btl_nc_component.sendthread, 0, &send_thread, 0);
         }
         else {
@@ -612,12 +608,12 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 
     if( MY_RANK == 0 ) {
         fprintf(stderr, "************ NC-BTL 1.8.x ************\n");
-                fprintf(stderr, "-USING SEND THREADS  : %s\n", mca_btl_nc_component.async_send ? "YES" : "NO");
-                fprintf(stderr, "-USING SHARED QUEUES : %s\n", mca_btl_nc_component.shared_queues ? "YES" : "NO");
-                fprintf(stderr, "\n");
-                fprintf(stderr, "to modify these use mpiexec parameters :\n");
-                fprintf(stderr, "--mca btl_nc_shared_queues (0|1)\n");
-                fprintf(stderr, "--mca btl_nc_send_thread (0|1)\n");
+        fprintf(stderr, "-USING SEND THREADS  : %s\n", mca_btl_nc_component.async_send ? "YES" : "NO");
+        fprintf(stderr, "-USING SHARED QUEUES : %s\n", mca_btl_nc_component.shared_queues ? "YES" : "NO");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "to modify these use mpiexec parameters :\n");
+        fprintf(stderr, "--mca btl_nc_shared_queues (0|1)\n");
+        fprintf(stderr, "--mca btl_nc_send_thread (0|1)\n");
         fflush(stderr);
     }
 
@@ -1234,23 +1230,22 @@ void sendack(int peer, frag_t* sfrag)
     int peer_node = (dst >> 16);
     int dst_ndx = (dst & 0xffff);
 
-    bool local = (peer_node == mca_btl_nc_component.group);
-//local = false;
-
-    // if there are already pending sends to peer, this message must be queued also
-    bool queued = !local && mca_btl_nc_component.sendqcnt[peer];
-
     int size = sizeof(void*);
+
+    bool local = (peer_node == mca_btl_nc_component.group);
 
     if( local ) {
         frag_t* frag = allocfrag(size);
         frag->msgtype = MSG_TYPE_ACK;
         frag->size = size;
-                frag->send = -1;
+        frag->send = -1;
         *(void**)(frag + 1) = sfrag;
         push_peerq(dst_ndx, frag);
         return;
     }
+
+    // if there are already pending sends to peer, this message must be queued also
+    bool queued = mca_btl_nc_component.sendqcnt[peer];
 
     if( !queued ) {
         rhdr_t ALIGN8 rhdr;
@@ -1296,25 +1291,33 @@ frag_t* allocfrag(int size)
     assert( (size > 0) && (size < MAX_MSG_SIZE + 1024) );
 
     int size8 = ((size + 7) & ~7) + sizeof(frag_t);
-    frag_t* frag;
 
     // allocate frag in shared mem
-    frag = (frag_t*)mca_btl_nc_component.shm_fragbase;
+    frag_t*  frag = (frag_t*)mca_btl_nc_component.shm_fragbase;
 
     node_t* nodedesc = mca_btl_nc_component.nodedesc;
     __semlock(&nodedesc->fraglock);
 
+    bool out_of_mem = false;
+
     for( ; ; ) {
         if( !frag->inuse && (frag->fsize >= size8) ) {
+            if( out_of_mem ) {
+                fprintf(stderr, "**** FRAGMENT ALLOCATED, RANK %d...\n", MY_RANK);
+                fflush(stderr);
+            }
             break;
         }
         if( frag->lastfrag ) {
             __semunlock(&nodedesc->fraglock);
-            fprintf(stderr, "****WARNING : OUT OF FRAGMENT MEMORY, RANK %d\n", MY_RANK);
-            fflush(stderr);
+            if( !out_of_mem ) {
+                fprintf(stderr, "****WARNING : OUT OF FRAGMENT MEMORY, RANK %d\n", MY_RANK);
+                fflush(stderr);
+            }
             usleep(4000000);
             frag = (frag_t*)mca_btl_nc_component.shm_fragbase;
             __semlock(&nodedesc->fraglock);
+            out_of_mem = true;
             continue;
         }
 
@@ -1441,7 +1444,6 @@ static void push_sendq_async(int peer, frag_t* frag)
 
     if( list->head ) {
         frag_t* tail = list->tail;
-        assert( tail );
         if( mca_btl_nc_component.shared_queues ) {
             tail = (frag_t*)PROCADDR(tail);
         }
@@ -1470,13 +1472,12 @@ static void push_sendq_sync(int peer, frag_t* frag)
 
     if( mca_btl_nc_component.shared_queues ) {
         // shared send list
-        node_t* nodedesc = mca_btl_nc_component.nodedesc;
 
         int msgtype = frag->msgtype;
         frag->next = 0;
         frag = (frag_t*)NODEADDR(frag);
 
-        pthread_mutex_lock(&nodedesc->send_mutex);
+        __semlock(&list->lock);
 
         if( list->head ) {
             frag_t* tail = (frag_t*)PROCADDR(list->tail);
@@ -1491,7 +1492,7 @@ static void push_sendq_sync(int peer, frag_t* frag)
             ++mca_btl_nc_component.sendqcnt[peer];
         }
 
-        pthread_mutex_unlock(&nodedesc->send_mutex);
+        __semunlock(&list->lock);
     }
     else {
         // peer to peer, non shared send list
@@ -1629,7 +1630,7 @@ static void ringbind()
 }
 
 
-static void send_p2p(int qndx)
+static void send_async_p2p(int qndx)
 {
     node_t* nodedesc = mca_btl_nc_component.nodedesc;
     pthread_cond_t* sendq_cond = &nodedesc->send_cond;
@@ -1698,7 +1699,7 @@ static void send_p2p(int qndx)
 }
 
 
-static void send_sharedq(int qndx)
+static void send_async_sharedq(int qndx)
 {
     node_t* nodedesc = mca_btl_nc_component.nodedesc;
     pthread_cond_t* sendq_cond = &nodedesc->send_cond;
@@ -1844,10 +1845,10 @@ static void* send_thread(void* arg)
     __sfence();
 
     if( mca_btl_nc_component.shared_queues ) {
-        send_sharedq(qndx);
+        send_async_sharedq(qndx);
     }
     else {
-        send_p2p(qndx);
+        send_async_p2p(qndx);
     }
 
     return NULL;
@@ -1877,34 +1878,29 @@ void send_sync_p2p()
 
 void send_sync_sharedq()
 {
-    node_t* nodedesc = mca_btl_nc_component.nodedesc;
-    pthread_mutex_t* sendq_mutex = &nodedesc->send_mutex;
-    if( !pthread_mutex_trylock(sendq_mutex) ) {
+    fifolist_t* list = mca_btl_nc_component.pending_sends;
 
-        fifolist_t* list = mca_btl_nc_component.pending_sends;
+    if( __semtrylock(&list->lock) ) {
         frag_t* frag = list->head;
-        int type;
+        int type, peer;
         bool done = false;
 
         if( frag ) {
-
             frag = (frag_t*)PROCADDR(frag);
             frag_t* next = frag->next;
             type = frag->msgtype;
-            int peer = frag->peer;
+            peer = frag->peer;
 
             if( send_msg(frag) ) {
-
                 list->head = next;
+                done = true;
 
                 if( type == MSG_TYPE_ISEND ) {
                     --mca_btl_nc_component.sendqcnt[peer];
                 }
-                done = true;
             }
         }
-
-        pthread_mutex_unlock(sendq_mutex);
+        __semunlock(&list->lock);
 
         if( done && ((type == MSG_TYPE_ISEND) || (type == MSG_TYPE_ACK)) ) {
             freefrag(frag);
@@ -1979,7 +1975,7 @@ static bool send_msg(frag_t* frag)
         n -= k;
 
         if( n ) {
-            scopy(q, p, n << 3, sbit);
+            scopy2(q, p, n << 3, sbit);
             p += n;
         }
 
@@ -2051,7 +2047,7 @@ static bool isend_msg(int node, rhdr_t* hdr, void* buf, int size)
     n -= k;
 
     if( n ) {
-        scopy(q, p, n << 3, sbit);
+        scopy2(q, p, n << 3, sbit);
     }
 
     __asm__ __volatile__ ("sfence\n");
