@@ -136,7 +136,7 @@ static int nc_register(void)
 
     mca_btl_nc_component.async_send = 0;
     mca_base_component_var_register(&mca_btl_nc_component.super.btl_version,
-                                    "send_thread", "Whether or not to enable asynchronously send threads",
+                                    "async_send", "Whether or not to enable asynchronous sends",
                                     MCA_BASE_VAR_TYPE_UNSIGNED_INT, NULL, 0, 0,
                                     OPAL_INFO_LVL_9, MCA_BASE_VAR_SCOPE_READONLY,
                                     &mca_btl_nc_component.async_send);
@@ -328,7 +328,7 @@ int mca_btl_nc_component_progress(void)
 
                     frag->msgtype = type;
                     frag->size = size;
-                                        frag->send = size;
+                    frag->send = size;
 
                     read_msg(frag + 1, r, (rhdr_t*)rhdr, sbit);
                     done = true;
@@ -535,16 +535,16 @@ static void rcopy(void* dst, volatile void* src, int size, int sbit)
 
         for( int i = 0; i < k; i++ ) {
             // wait until receive completed
-            while( ((*p) & 1) != sbit ) {
+            do {
                 __asm__ __volatile__ ("pause");
-            }
+            } while( ((*p) & 1) != sbit );
             *q++ = *p++;
         }
 
         // wait until receive completed
-        while( ((*p) & 1) != sbit ) {
+        do {
             __asm__ __volatile__ ("pause");
-        }
+        } while( ((*p) & 1) != sbit );
         uint64_t b = *p++;
         b >>= 1;
 
@@ -589,9 +589,9 @@ static void read_msg(void* dst, ring_t* r, const rhdr_t* rhdr, int sbit)
 
         for( int i = 0; i < k; i++ ) {
             // wait until receive completed
-            while( ((*p) & 1) != sbit ) {
+            do {
                 __asm__ __volatile__ ("pause");
-            }
+            } while( ((*p) & 1) != sbit );
             *q++ = *p++;
         }
 

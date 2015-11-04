@@ -207,11 +207,11 @@ typedef struct frag {
     bool         inuse;     // fragment is in use
     int32_t      size;      // message body size including mpi headers
     int32_t      prevsize;  // previous frag size
-    int32_t      peer;          // target peer
+    int32_t      peer;      // target peer
     int32_t      node;      // target node
     int32_t      send;      // bytes send
     bool         lastfrag;  // last frag in pool
-    int32_t      msgtype;       // message type
+    int32_t      msgtype;   // message type
     int32_t      pad;       // padding
     struct frag* next;      // next in list, next in pool is determined by size
 } frag_t;
@@ -274,10 +274,10 @@ typedef struct {
     int32_t          ring_cnt ALIGN8;
     volatile int32_t fraglock ALIGN8;
     volatile bool    active;
-    pthread_cond_t       send_cond ALIGN8;
-    pthread_mutex_t      send_mutex ALIGN8;
+    pthread_cond_t   send_cond ALIGN8;
+    pthread_mutex_t  send_mutex ALIGN8;
     void*            shm_base;
-    void*                shm_frags;             // base of frags in shared mem
+    void*            shm_frags;             // base of frags in shared mem
     frag_t*          recvfrag[MAX_GROUPS];
     // !must be last member
     int32_t          ndxmax ALIGN8;     // max peer index on local node
@@ -318,11 +318,11 @@ struct mca_btl_nc_component_t {
     sysctxt_t*  sysctxt;                    // global shm mapping info
     pthread_t   sendthread;
 
-    uint32_t**  stail;                              // pointers to local send tails
+    uint32_t**  stail;                      // pointers to local send tails
     uint32_t**  peer_stail;                 // pointers to peers send tails
 
-    fifolist_t* inq;                                // input queues
-    fifolist_t* myinq;                              // local input queue
+    fifolist_t* inq;                        // input queues
+    fifolist_t* myinq;                      // local input queue
     int32_t*    sendqcnt;
 
     uint32_t*   map;

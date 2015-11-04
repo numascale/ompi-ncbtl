@@ -495,7 +495,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
     /*
     peer ring descriptors
     pending sends list
-        pending sends counters
+    pending sends counters
     input lists
     rings
     fragments
@@ -525,7 +525,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
                      MADV_DONTNEED);
     if( rc != 0 ) {
         fprintf(stderr, "madvise() failed, errno = %d\n", errno);
-                fflush(stderr);
+        fflush(stderr);
     }
 
     mca_btl_nc_component.shm_base = shmbase;
@@ -571,7 +571,7 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
         nodedesc->shm_base = shmbase;
 
         nodedesc->shm_frags = mca_btl_nc_component.shm_fragbase;
-                // init frag heap
+        // init frag heap
         frag_t* frag = (frag_t*)nodedesc->shm_frags;
         frag->inuse = false;
         frag->prevsize = 0;
@@ -608,12 +608,12 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 
     if( MY_RANK == 0 ) {
         fprintf(stderr, "************ NC-BTL 1.8.x ************\n");
-        fprintf(stderr, "-USING SEND THREADS  : %s\n", mca_btl_nc_component.async_send ? "YES" : "NO");
-        fprintf(stderr, "-USING SHARED QUEUES : %s\n", mca_btl_nc_component.shared_queues ? "YES" : "NO");
+        fprintf(stderr, "-USING ASYNCRONOUS SEND : %s\n", mca_btl_nc_component.async_send ? "YES" : "NO");
+        fprintf(stderr, "-USING SHARED QUEUES    : %s\n", mca_btl_nc_component.shared_queues ? "YES" : "NO");
         fprintf(stderr, "\n");
         fprintf(stderr, "to modify these use mpiexec parameters :\n");
         fprintf(stderr, "--mca btl_nc_shared_queues (0|1)\n");
-        fprintf(stderr, "--mca btl_nc_send_thread (0|1)\n");
+        fprintf(stderr, "--mca btl_nc_async_send    (0|1)\n");
         fflush(stderr);
     }
 
@@ -717,12 +717,14 @@ int mca_btl_nc_del_procs(
 
 int mca_btl_nc_finalize(struct mca_btl_base_module_t* btl)
 {
-    mca_btl_nc_component.nodedesc->active = 0;
-    if( mca_btl_nc_component.async_send ) {
-        pthread_cond_signal(&mca_btl_nc_component.nodedesc->send_cond);
-    }
+    if( mca_btl_nc_component.nodedesc ) {
+        mca_btl_nc_component.nodedesc->active = 0;
+        if( mca_btl_nc_component.async_send ) {
+            pthread_cond_signal(&mca_btl_nc_component.nodedesc->send_cond);
+        }
 
-    print_stat();
+        print_stat();
+    }
     return OMPI_SUCCESS;
 }
 
@@ -905,7 +907,7 @@ extern mca_btl_base_descriptor_t* mca_btl_nc_alloc(
     uint32_t dst = mca_btl_nc_component.map[peer];
     int peer_node = (dst >> 16);
 
-        bool local = (peer_node == mca_btl_nc_component.group);
+    bool local = (peer_node == mca_btl_nc_component.group);
 //local = false;
 
     uint32_t size8 = ((sizeof(mca_btl_nc_hdr_t) + size + 7) & ~7);
@@ -916,7 +918,7 @@ extern mca_btl_base_descriptor_t* mca_btl_nc_alloc(
     }
 
     mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(frag + 1);
-        if( !local ) {
+    if( !local ) {
         hdr = (mca_btl_nc_hdr_t*)((void*)hdr + RHDR_SIZE);
     }
 
@@ -975,10 +977,10 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
     int size = header_size + payload_size;
     int size8 = ((size + 7) & ~7);
 
-        bool local = (peer_node == mca_btl_nc_component.group);
+    bool local = (peer_node == mca_btl_nc_component.group);
 //local = false;
 
-        if( local ) {
+    if( local ) {
         frag_t* frag = allocfrag(size8);
         if( !frag ) {
             // upper layers will call progress() first and than try sending again
@@ -986,34 +988,34 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
         }
         void* data = frag + 1;
 
-                if( header_size ) {
-                        memcpy(data, header, header_size);
-                }
-
-                if( payload_size ) {
-                        size_t max_data;
-                        uint32_t iov_count = 1;
-                        struct iovec iov;
-                        iov.iov_len = max_data = payload_size;
-                        iov.iov_base = data + header_size;
-
-                        int rc = opal_convertor_pack(convertor, &iov, &iov_count, &max_data);
-                        if( rc < 0 ) {
-                                freefrag(frag);
-                                // upper layers will call progress() first and than try sending again
-                                return OMPI_ERR_RESOURCE_BUSY;
-                        }
-                }
-
-                frag->msgtype = MSG_TYPE_ISEND;
-                frag->size = size;
-                frag->send = -1;
-                push_peerq(dst_ndx, frag);
-                return OMPI_SUCCESS;
+        if( header_size ) {
+            memcpy(data, header, header_size);
         }
 
-        // if there are already pending sends to peer, this message must be queued also
-        bool queued = mca_btl_nc_component.sendqcnt[peer];
+        if( payload_size ) {
+            size_t max_data;
+            uint32_t iov_count = 1;
+            struct iovec iov;
+            iov.iov_len = max_data = payload_size;
+            iov.iov_base = data + header_size;
+
+            int rc = opal_convertor_pack(convertor, &iov, &iov_count, &max_data);
+            if( rc < 0 ) {
+                freefrag(frag);
+                // upper layers will call progress() first and than try sending again
+                return OMPI_ERR_RESOURCE_BUSY;
+            }
+        }
+
+        frag->msgtype = MSG_TYPE_ISEND;
+        frag->size = size;
+        frag->send = -1;
+        push_peerq(dst_ndx, frag);
+        return OMPI_SUCCESS;
+    }
+
+    // if there are already pending sends to peer, this message must be queued also
+    bool queued = mca_btl_nc_component.sendqcnt[peer];
 
     frag_t* frag = 0;
     assert( size <= MAX_EAGER_SIZE );
@@ -1027,7 +1029,7 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
             return OMPI_ERR_RESOURCE_BUSY;
         }
         data = (void*)(frag + 1) + RHDR_SIZE;
-        }
+    }
 
     if( header_size ) {
         memcpy(data, header, header_size);
@@ -1048,7 +1050,7 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
         }
     }
 
-        if( !queued ) {
+    if( !queued ) {
         rhdr_t ALIGN8 rhdr;
         rhdr.type = MSG_TYPE_ISEND;
         rhdr.dst_ndx = dst_ndx;
@@ -1058,13 +1060,13 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
         if( rc ) {
             return OMPI_SUCCESS;
         }
-                do {
-                        frag = allocfrag(RHDR_SIZE + size8);
-                } while( !frag );
+        do {
+            frag = allocfrag(RHDR_SIZE + size8);
+        } while( !frag );
 
         data = (void*)(frag + 1) + RHDR_SIZE;
         memcpy(data, txbuf, size);
-        }
+    }
 
     rhdr_t* rhdr = (rhdr_t*)(frag + 1);
     rhdr->dst_ndx = dst_ndx;
@@ -1120,7 +1122,7 @@ struct mca_btl_base_descriptor_t* mca_btl_nc_prepare_src(
 
     frag_t* frag = allocfrag(RHDR_SIZE + size8);
 
-        bool local = (peer_node == mca_btl_nc_component.group);
+    bool local = (peer_node == mca_btl_nc_component.group);
 //local = false;
 
     mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(local ? (void*)(frag + 1) : (void*)(frag + 1) + RHDR_SIZE);
@@ -1142,7 +1144,7 @@ struct mca_btl_base_descriptor_t* mca_btl_nc_prepare_src(
     assert( sz1 > 0 );
 
     hdr->frag = frag;
-        hdr->size = msgsize;
+    hdr->size = msgsize;
 
     hdr->segment.base.seg_addr.pval = hdr + 1;
     hdr->segment.base.seg_len = reserve + max_data;
@@ -1192,10 +1194,10 @@ int mca_btl_nc_send( struct mca_btl_base_module_t* btl,
 
     if( local ) {
         frag->msgtype = MSG_TYPE_FRAG;
-                frag->send = -1;
+        frag->send = -1;
         push_peerq(dst_ndx, frag);
-        }
-        else {
+    }
+    else {
         frag->node = peer_node;
         frag->peer = peer;
 
@@ -1664,7 +1666,7 @@ static void send_async_p2p(int qndx)
             int type = frag->msgtype;
             int peer = frag->peer;
 
-                        // takeout of send list
+            // takeout of send list
             if( frag->next ) {
                 list->head = frag->next;
             }
@@ -1685,8 +1687,8 @@ static void send_async_p2p(int qndx)
                 }
             }
             else {
-                                // send failed or not completely done,
-                                // prepend to send list again
+                // send failed or not completely done,
+                // prepend to send list again
                 pthread_mutex_lock(sendq_mutex);
                 frag->next = list->head;
                 list->head = frag;
@@ -1760,7 +1762,7 @@ static void send_async_sharedq(int qndx)
             if( !skip[frag->node] && send_msg(frag) ) {
 
                 if( type == MSG_TYPE_ISEND ) {
-                        lockedAdd(&sendqcnt[peer], -1);
+                    lockedAdd(&sendqcnt[peer], -1);
                 }
 
                 if( type == MSG_TYPE_ISEND || type == MSG_TYPE_ACK ) {
@@ -1816,9 +1818,9 @@ static void* send_thread(void* arg)
             newid = cpuid + 1;
         }
         else
-            if( numa_node_of_cpu(cpuid - 1) == nodeid ) {
-                newid = cpuid - 1;
-            }
+        if( numa_node_of_cpu(cpuid - 1) == nodeid ) {
+            newid = cpuid - 1;
+        }
         if( newid >= 0 ) {
             bind_cpu(newid);
         }
@@ -2128,33 +2130,34 @@ static void scopy2(void* dst, const void* src, int size, int sbit)
         }
         n -= k;
 
-        __asm__ __volatile__ (
-            "movl %2, %%ecx\n"      // k -> ecx
-            "xorq %%rbx, %%rbx\n"   // 0 -> rbx
-            "movq %3, %%r8\n"       // sbit -> r8
-            "movq %4, %%rsi\n"      // p -> rsi
-            "movq %5, %%rdi\n"      // q -> rdi
-            "1:\n"                  // for k
-            "movq (%%rsi), %%rax\n" // *p->rax
-            "shlq $1, %%rbx\n"      // b <<= 1
-            "movq %%rax, %%rdx\n"   // rax -> rdx
-            "shrq $1, %%rax\n"              // ax <<= 1
-            "shlq $1, %%rax\n"              // ax >>= 1
-            "orq  %%r8, %%rax\n"    // z |= sbit
-            "movnti %%rax, (%%rdi)\n" // z -> *q
-            "andq $1, %%rdx\n"      // dx &= 1
-            "orq  %%rdx, %%rbx\n"   // b |= (z & 1)
-            "addq $8, %%rsi\n"      // ++p
-            "addq $8, %%rdi\n"      // ++q
-            "loop 1b\n"                             // next k
-            "shlq $1, %%rbx\n"              // b <<= 1
-            "orq  %%r8, %%rbx\n"    // b |= sbit
-            "movnti %%rbx, (%%rdi)\n" // b -> *q
-            "addq $8, %%rdi\n"      // ++q
-            "movq %%rsi, %0\n"
-            "movq %%rdi, %1\n"
-            : "=r" (p), "=r" (q)
-            : "r" (k), "r" (sb), "r" (p), "r" (q)
-            : "ecx", "rax", "rbx", "rdx", "rsi", "rdi", "r8");
+        __asm__ __volatile__
+            ("movl %2, %%ecx\n"      // k -> ecx
+             "xorq %%rbx, %%rbx\n"   // 0 -> rbx
+             "movq %3, %%r8\n"       // sbit -> r8
+             "movq %4, %%rsi\n"      // p -> rsi
+             "movq %5, %%rdi\n"      // q -> rdi
+             "1:\n"                  // for k
+             "movq (%%rsi), %%rax\n" // *p->rax
+             "shlq $1, %%rbx\n"      // b <<= 1
+             "movq %%rax, %%rdx\n"   // rax -> rdx
+             "shrq $1, %%rax\n"              // ax <<= 1
+             "shlq $1, %%rax\n"              // ax >>= 1
+             "orq  %%r8, %%rax\n"    // z |= sbit
+             "movnti %%rax, (%%rdi)\n" // z -> *q
+             "andq $1, %%rdx\n"      // dx &= 1
+             "orq  %%rdx, %%rbx\n"   // b |= (z & 1)
+             "addq $8, %%rsi\n"      // ++p
+             "addq $8, %%rdi\n"      // ++q
+             "loop 1b\n"                             // next k
+             "shlq $1, %%rbx\n"              // b <<= 1
+             "orq  %%r8, %%rbx\n"    // b |= sbit
+             "movnti %%rbx, (%%rdi)\n" // b -> *q
+             "addq $8, %%rdi\n"      // ++q
+             "movq %%rsi, %0\n"
+             "movq %%rdi, %1\n"
+             : "=r" (p), "=r" (q)
+             : "r" (k), "r" (sb), "r" (p), "r" (q)
+             : "ecx", "rax", "rbx", "rdx", "rsi", "rdi", "r8");
     }
 }
+
