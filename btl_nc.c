@@ -71,11 +71,9 @@ static void print_stat();
 static rhdr_t* allocring(int peer_node, int size, int* sbit);
 static bool isend_msg(int node, rhdr_t* hdr, void* buf, int size);
 static bool send_msg(frag_t* frag);
-static void push_peerq(int peer, frag_t* frag);
 static void push_sendq_sync(int peer, frag_t* frag);
 static void push_sendq_async(int peer, frag_t* frag);
 static void scopy(void* dst, const void* src, int size, int sbit);
-static void scopy2(void* dst, const void* src, int size, int sbit);
 static void ringbind();
 
 
@@ -83,6 +81,14 @@ frag_t* allocfrag(int size);
 void freefrag(frag_t* frag);
 void INThandler(int sig);
 
+
+static uint64_t inline rdtscp(uint32_t* id)
+{
+    uint32_t lo, hi, aux;
+    __asm__ __volatile__ (".byte 0x0f,0x01,0xf9" : "=a" (lo), "=d" (hi), "=c" (aux));
+    *id = aux;
+    return (uint64_t)hi << 32 | lo;
+}
 
 
 static void bind_cpu(int id) {
@@ -159,15 +165,6 @@ mca_btl_nc_t mca_btl_nc = {
 int mca_btl_nc_ft_event(int state)
 {
     return OMPI_SUCCESS;
-}
-
-
-static uint64_t inline rdtscp(uint32_t* id)
-{
-    uint32_t lo, hi, aux;
-    __asm__ __volatile__ (".byte 0x0f,0x01,0xf9" : "=a" (lo), "=d" (hi), "=c" (aux));
-    *id = aux;
-    return (uint64_t)hi << 32 | lo;
 }
 
 
@@ -353,172 +350,53 @@ int mca_btl_nc_add_procs(
     /* update the local smp process count */
     mca_btl_nc_component.num_smp_procs += n_local_procs;
 
-    if (OMPI_SUCCESS != return_code)
-        goto CLEANUP;
-
 CLEANUP:
     return return_code;
 }
 
 
-static int add_to_group(int rank_count)
-{
-    size_t pagesize = sysconf(_SC_PAGESIZE);
-
-    if( mca_btl_nc_component.shared_queues == -1 ) {
-        mca_btl_nc_component.shared_queues = (rank_count > MAX_P2P);
-    }
-    bool qshared = mca_btl_nc_component.shared_queues;
-
-    int numa_nodes = numa_num_configured_nodes();
-    int max_cpus = numa_num_configured_cpus();
-    int max_nodes = qshared ? numa_nodes : rank_count;
-
-    size_t noderecsize = ((sizeof(node_t) + pagesize - 1) & ~(pagesize - 1));
-    size_t syssize = ((sizeof(sysctxt_t) + pagesize - 1) & ~(pagesize - 1));
-    size_t shmsize = syssize + (max_nodes * noderecsize);
-
-    sysctxt_t* sysctxt = (sysctxt_t*)map_shm(true, shmsize);
-    if( !sysctxt ) {
-        return -1;
-    }
-
-    mca_btl_nc_component.sysctxt = sysctxt;
-    sysctxt->max_nodes = max_nodes;
-
-    int cpuid = currCPU();
-    sysctxt->cpuid[MY_RANK] = cpuid + 1;
-    int currnode = currNumaNode();
-
-    void* nodedesc0 = (void*)sysctxt + syssize;
-    int32_t* numadist = sysctxt->numadist;
-    int32_t* numanode = sysctxt->numanode;
-
-    __semlock(&sysctxt->lock);
-
-    ++sysctxt->rank_count;
-
-    if( numadist[0] == 0 ) {
-        // cache numa info
-        for( int i = 0; i < numa_nodes; i++ ) {
-            for( int j = 0; j < numa_nodes; j++ ) {
-                numadist[i * numa_nodes + j] = numa_distance(i, j);
-            }
-        }
-
-        for( int i = 0; i < max_cpus; i++ ) {
-            numanode[i] = numa_node_of_cpu(i);
-        }
-    }
-
-    int group = -1;
-    if( !qshared ) {
-        group = MY_RANK;
-    }
-    else {
-        for( int i = 0; i < numa_nodes; i++ ) {
-            if( numadist[currnode * numa_nodes + i] <= mca_btl_nc_component.grp_numa_dist ) {
-                if( sysctxt->group[i] - 1 >= 0 ) {
-                    group = sysctxt->group[i] - 1;
-                    break;
-                }
-            }
-        }
-        if( group < 0 ) {
-            group = sysctxt->node_count++;
-            sysctxt->group[currnode] = group + 1;
-        }
-    }
-
-    node_t* nodedesc = (node_t*)(nodedesc0 + group * noderecsize);
-    int32_t cpuindex = nodedesc->ndxmax++;
-
-    __semunlock(&sysctxt->lock);
-
-    mca_btl_nc_component.group = group;
-    mca_btl_nc_component.cpuindex = cpuindex;
-    sysctxt->map[MY_RANK] = ((((uint32_t)group) << 16) | cpuindex);
-
-    return group;
-}
-
-
 static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
 {
-    assert( sizeof(frag_t) == FRAG_SIZE );
-
-    size_t pagesize = sysconf(_SC_PAGESIZE);
-    mca_btl_nc_component.grp_numa_dist = INTRA_GROUP_NUMA_DIST;
-
-    int node = add_to_group(n);
-    if( node < 0 ) {
-        return OMPI_ERR_OUT_OF_RESOURCE;
-    }
-
-    sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
-    sysctxt->num_smp_procs = n;
-    mca_btl_nc_component.map = sysctxt->map;
-
-    int cpuindex = mca_btl_nc_component.cpuindex;
-
-    int max_nodes = sysctxt->max_nodes;
-
-    size_t noderecsize = ((sizeof(node_t) + pagesize - 1) & ~(pagesize - 1));
-    size_t syssize = ((sizeof(sysctxt_t) + pagesize - 1) & ~(pagesize - 1));
-    size_t shmsize = syssize + (max_nodes * noderecsize);
-
-    void* node0 = (void*)sysctxt + syssize;
-    mca_btl_nc_component.peer_node = (node_t**)malloc(max_nodes * sizeof(void*));
-    for( int i = 0; i < max_nodes; i++ ) {
-        mca_btl_nc_component.peer_node[i] = (node_t*)(node0 + i * noderecsize);
-    }
-
-    mca_btl_nc_component.nodedesc = mca_btl_nc_component.peer_node[node];
-    volatile node_t* nodedesc = mca_btl_nc_component.nodedesc;
-
-    // init pointers to send tails in shared mem
-    // these pointers will be used by the receiver to reset the send tail on the sender side
-    mca_btl_nc_component.peer_stail = (uint32_t**)malloc(max_nodes * sizeof(void*));
-    for( int i = 0; i < max_nodes; i++ ) {
-        mca_btl_nc_component.peer_stail[i] = mca_btl_nc_component.peer_node[i]->stail;
-    }
-
-    mca_btl_nc_component.stail = (uint32_t**)malloc(max_nodes * sizeof(void*));
-    uint32_t* stail = mca_btl_nc_component.peer_stail[node];
-    for( int i = 0; i < max_nodes; i++ ) {
-        // use one cache line per counter
-        mca_btl_nc_component.stail[i] = stail + i;
-    }
-
-    bool qshared = mca_btl_nc_component.shared_queues;
-
     /*
+    ring descriptors
     peer ring descriptors
-    pending sends list
-    pending sends counters
-    input lists
     rings
     fragments
     */
 
-    shmsize = max_nodes * sizeof(pring_t);
-    shmsize += sizeof(fifolist_t);       // pending sends list
-    shmsize += n * sizeof(int32_t);              // counters for pending messages from this node to peers
-    shmsize += max_nodes * sizeof(fifolist_t); // input lists
+    size_t pagesize = sysconf(_SC_PAGESIZE);
+
+    size_t shmsize = n * sizeof(ring_t);
+	shmsize += n * sizeof(pring_t);
     shmsize = (shmsize + pagesize - 1) & ~(pagesize - 1);
 
     size_t ring_ofs = shmsize;
+	mca_btl_nc_component.ring_ofs = ring_ofs;
 
-    shmsize += (size_t)max_nodes * (size_t)RING_SIZE;
-
+    shmsize += (size_t)n * (size_t)RING_SIZE;
     size_t frag_ofs = shmsize;
 
     shmsize += MAX_SIZE_FRAGS;
     shmsize = (shmsize + pagesize - 1) & ~(pagesize - 1);
 
     // map local mem
-    void* shmbase = map_shm(false, max_nodes * shmsize);
-    assert( shmbase );
+    void* shm = map_shm(false, n * shmsize);
+    assert( shm );
+
+    mca_btl_nc_component.shm_base = (void**)malloc(n * sizeof(void*));
+    for( int i = 0; i < n; i++ ) {
+		mca_btl_nc_component.shm_base[i] = shm + i * shmsize;
+	}
+
+    // init pointers to send tails in shared mem
+    // these pointers will be used by the receiver to reset the send tail on the sender side
+    mca_btl_nc_component.peer_stail = (uint32_t**)malloc(n * sizeof(void*));
+    for( int i = 0; i < n; i++ ) {
+		pring_t* pr = (pring_t*)(mca_btl_nc_component.shm_base[i] + (n * sizeof(ring_t)));
+        mca_btl_nc_component.peer_stail[i] = &((pr + MY_RANK)->stail);
+    }
+
+    void* shmbase = mca_btl_nc_component.shm_base[MY_RANK];
 
     int rc = madvise(shmbase + frag_ofs + (1024 * 1024),
                      shmsize - frag_ofs - (1024 * 1024),
@@ -528,70 +406,50 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
         fflush(stderr);
     }
 
-    mca_btl_nc_component.shm_base = shmbase;
-
-    shmbase += (node * shmsize);
+    memset(shmbase, 0, n * sizeof(ring_t) + n * sizeof(pring_t));
 
     mca_btl_nc_component.shm_ringbase = shmbase + ring_ofs;
     mca_btl_nc_component.shm_fragbase = shmbase + frag_ofs;
 
     // init list of pointers to local peer ring descriptors
-    mca_btl_nc_component.peer_ring = (pring_t*)shmbase;
+    mca_btl_nc_component.peer_ring = (pring_t*)(shmbase + n * sizeof(ring_t));
 
-    mca_btl_nc_component.peer_ring_buf = (void**)malloc(max_nodes * sizeof(void*));
-    memset(mca_btl_nc_component.peer_ring_buf, 0, max_nodes * sizeof(void*));
+    mca_btl_nc_component.peer_ring_buf = (void**)malloc(n * sizeof(void*));
+    memset(mca_btl_nc_component.peer_ring_buf, 0, n * sizeof(void*));
 
-    mca_btl_nc_component.pending_sends = (fifolist_t*)(
-        shmbase + max_nodes * sizeof(pring_t));
+	ring_t* ring = (ring_t*)shmbase;
+    for( int i = 0; i < n; i++ ) {
+		ring->peer = -1;
+		++ring;
+	}
 
     // local input queue
-    mca_btl_nc_component.inq = shmbase
-                               + max_nodes * sizeof(pring_t)
-                               + sizeof(fifolist_t)
-                               + n * sizeof(int32_t);
+    mca_btl_nc_component.inq = (fifolist_t*)malloc(n * sizeof(fifolist_t));
+	memset(mca_btl_nc_component.inq, 0, n * sizeof(fifolist_t));
+    mca_btl_nc_component.myinq = mca_btl_nc_component.inq;
 
-    mca_btl_nc_component.myinq = mca_btl_nc_component.inq + cpuindex;
+    mca_btl_nc_component.sendqcnt = (int32_t*)malloc(n * sizeof(int32_t));
+	memset(mca_btl_nc_component.sendqcnt, 0, n * sizeof(int32_t));
 
-    mca_btl_nc_component.sendqcnt = shmbase
-                                    + max_nodes * sizeof(pring_t)
-                                    + sizeof(fifolist_t);
+    ringbind();
 
-    if( cpuindex == 0 ) {
+    // init frag heap
+    frag_t* frag = (frag_t*)mca_btl_nc_component.shm_fragbase;
+    frag->inuse = false;
+    frag->prevsize = 0;
+    frag->fsize = MAX_SIZE_FRAGS;
+    frag->lastfrag = true;
 
-        sysctxt->ring_ofs[node] = (node * shmsize) + ring_ofs;
-
-        node_t* nodedesc = mca_btl_nc_component.nodedesc;
-
-        // init node structure, dont clear last structure member cpuindex
-        memset(nodedesc, 0, offsetof(node_t, ndxmax));
-        memset(mca_btl_nc_component.shm_base, 0, ring_ofs);
-
-        ringbind();
-
-        nodedesc->shm_base = shmbase;
-
-        nodedesc->shm_frags = mca_btl_nc_component.shm_fragbase;
-        // init frag heap
-        frag_t* frag = (frag_t*)nodedesc->shm_frags;
-        frag->inuse = false;
-        frag->prevsize = 0;
-        frag->fsize = MAX_SIZE_FRAGS;
-        frag->lastfrag = true;
-
-        if( mca_btl_nc_component.async_send ) {
-            pthread_mutex_t* sendq_mutex = &nodedesc->send_mutex;
-            pthread_mutexattr_t mutex_attr;
-            pthread_mutexattr_init(&mutex_attr);
-            if( mca_btl_nc_component.shared_queues ) {
-                pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
-            }
-            pthread_mutex_init(sendq_mutex, &mutex_attr);
-            pthread_create(&mca_btl_nc_component.sendthread, 0, &send_thread, 0);
-        }
-        else {
-            nodedesc->active = 1;
-            __sfence();
-        }
+    if( mca_btl_nc_component.async_send ) {
+        pthread_mutex_t* sendq_mutex = &mca_btl_nc_component.send_mutex;
+        pthread_mutexattr_t mutex_attr;
+        pthread_mutexattr_init(&mutex_attr);
+        pthread_mutex_init(sendq_mutex, &mutex_attr);
+        pthread_create(&mca_btl_nc_component.sendthread, 0, &send_thread, 0);
+    }
+    else {
+        mca_btl_nc_component.send_thread_active = 1;
+        __sfence();
     }
 
     char* ev = getenv("NCSTAT");
@@ -600,19 +458,13 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
         mca_btl_nc_component.statistics = createstat(n);
     }
 
-    // wait until cpuindex == 0 ready
-    while( !nodedesc->active );
-
-    // offset for local processes to local fragments
-    mca_btl_nc_component.shm_ofs = shmbase - nodedesc->shm_base;
+    while( !mca_btl_nc_component.send_thread_active );
 
     if( MY_RANK == 0 ) {
         fprintf(stderr, "************ NC-BTL 1.8.x ************\n");
         fprintf(stderr, "-USING ASYNCRONOUS SEND : %s\n", mca_btl_nc_component.async_send ? "YES" : "NO");
-        fprintf(stderr, "-USING SHARED QUEUES    : %s\n", mca_btl_nc_component.shared_queues ? "YES" : "NO");
         fprintf(stderr, "\n");
-        fprintf(stderr, "to modify these use mpiexec parameters :\n");
-        fprintf(stderr, "--mca btl_nc_shared_queues (0|1)\n");
+        fprintf(stderr, "to modify this use mpiexec parameters :\n");
         fprintf(stderr, "--mca btl_nc_async_send    (0|1)\n");
         fflush(stderr);
     }
@@ -620,8 +472,8 @@ static int nc_btl_first_time_init(mca_btl_nc_t* nc_btl, int n)
     signal(SIGUSR1, INThandler);
 
     /* set flag indicating btl has been inited */
+    __sfence();
     nc_btl->btl_inited = true;
-    __mfence();
 
     return OMPI_SUCCESS;
 }
@@ -643,38 +495,34 @@ create_nc_endpoint(int local_proc, struct ompi_proc_t *proc)
 
 static int createstat(int n)
 {
-    int flags = O_RDWR;
-    char* filename;
-    size_t pagesize = sysconf(_SC_PAGESIZE);
+	char* name = "/dev/shm/NCMPI_STAT";
+
+	struct stat sbuf;
+    //if( stat(name, &sbuf) == 0 ) {
+    //    unlink(name);
+    //}
+
+	int flags = (O_RDWR | O_CREAT);
+    int fd = open(name, flags, 0660);
+    if( fd < 0 ) {
+		fprintf(stderr, "opening mapping file %s failed\n", name);
+		fflush(stderr);
+		exit(-1);
+    }
+
+	size_t pagesize = sysconf(_SC_PAGESIZE);
     size_t size = n * pagesize;
-    struct stat sbuf;
-
-    if( asprintf(&filename, "%s"OPAL_PATH_SEP"nc_btl_module_stat.%s",
-                 orte_process_info.job_session_dir,
-                 orte_process_info.nodename) < 0 ) {
-        return 0;
+    if( 0 != ftruncate(fd, size) ) {
+ 	    fprintf(stderr, "mapping shared file %s failed\n", name);
+		fflush(stderr);
+		exit(-1);
     }
 
-    int ret = stat(filename, &sbuf);
-    if( ret < 0 && errno == ENOENT ) {
-        flags |= O_CREAT;
-    }
-
-    int shared_fd = open(filename, flags, 0600);
-    if( shared_fd < 0 ) {
-        fprintf(stderr, "open %s failed...\n", filename);
-        return 0;
-    }
-
-    if( 0 != ftruncate(shared_fd, size) ) {
-        fprintf(stderr, "failed to set the size of a shared file. Aborting.\n");
-        return 0;
-    }
-
-    uint8_t* shm = mmap(NULL, size, (PROT_READ | PROT_WRITE), MAP_SHARED, shared_fd, 0);
+    void* shm = mmap(NULL, size, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, 0);
 
     if( MAP_FAILED == shm ) {
-        fprintf(stderr, "failed to mmap a shared file %s\n", filename);
+ 	    fprintf(stderr, "mapping shared file %s failed\n", name);
+		fflush(stderr);
         return 0;
     }
 
@@ -688,6 +536,7 @@ static int createstat(int n)
     pstat->bytessend = 0;
     pstat->totmsgs = 0;
     pstat->active = 1;
+
     return 1;
 }
 
@@ -701,7 +550,7 @@ int mca_btl_nc_del_procs(
     return OMPI_SUCCESS;
 }
 
-
+	 
 /**
  * MCA->BTL Clean up any resources held by BTL module
  * before the module is unloaded.
@@ -717,14 +566,13 @@ int mca_btl_nc_del_procs(
 
 int mca_btl_nc_finalize(struct mca_btl_base_module_t* btl)
 {
-    if( mca_btl_nc_component.nodedesc ) {
-        mca_btl_nc_component.nodedesc->active = 0;
-        if( mca_btl_nc_component.async_send ) {
-            pthread_cond_signal(&mca_btl_nc_component.nodedesc->send_cond);
-        }
-
-        print_stat();
+    mca_btl_nc_component.send_thread_active = 0;
+    if( mca_btl_nc_component.async_send ) {
+        pthread_cond_signal(&mca_btl_nc_component.send_cond);
     }
+
+    print_stat();
+    
     return OMPI_SUCCESS;
 }
 
@@ -760,9 +608,9 @@ static void setstatistics(const uint32_t size)
         ++i;
     }
 
-    ++pstat->dist[i];
-    ++pstat->totmsgs;
-    pstat->bytessend += size;
+	__sync_add_and_fetch((uint64_t*)&(pstat->dist[i]), 1);
+	__sync_add_and_fetch((uint64_t*)&(pstat->totmsgs), 1);
+	__sync_add_and_fetch((uint64_t*)&(pstat->bytessend), size);
 }
 
 
@@ -852,40 +700,42 @@ static void print_stat()
             }
         }
 
-        char line[4096];
-        line[0] = 0;
-        k = 0;
-        for( j = 0; j < n; j++ ) {
-            int w = strlen(tab[j]);
-            memset(line + k, ' ', w);
-            strcpy(line + k + w - strlen(hdr[j]), hdr[j]);
-            k += w;
-        }
-        fprintf(stderr, "\n\n%s\n", line);
-        memset(line, '-', k);
-        line[k] = 0;
-        fprintf(stderr, "%s\n", line);
+		if( totmsgs > 0 ) {
+	        char line[4096];
+		    line[0] = 0;
+			k = 0;
+			for( j = 0; j < n; j++ ) {
+				int w = strlen(tab[j]);
+	            memset(line + k, ' ', w);
+		        strcpy(line + k + w - strlen(hdr[j]), hdr[j]);
+			    k += w;
+			}
+	        fprintf(stderr, "\n\n%s\n", line);
+		    memset(line, '-', k);
+			line[k] = 0;
+	        fprintf(stderr, "%s\n", line);
 
-        for( i = 0; i < m; i++ ) {
-            line[0] = 0;
-            for( j = 0; j < n; j++ ) {
-                char* str = tab[i * n + j];
-                strcat(line, str);
-                free(str);
-            }
-            fprintf(stderr, "%s\n", line);
-            fflush(stderr);
-        }
+	        for( i = 0; i < m; i++ ) {
+		        line[0] = 0;
+			    for( j = 0; j < n; j++ ) {
+				    char* str = tab[i * n + j];
+	                strcat(line, str);
+		            free(str);
+			    }
+				fprintf(stderr, "%s\n", line);
+	            fflush(stderr);
+		    }
 
-        memset(line, '-', k);
-        line[k] = 0;
-        fprintf(stderr, "%s\n", line);
+	        memset(line, '-', k);
+		    line[k] = 0;
+			fprintf(stderr, "%s\n", line);
 
-        fprintf(stderr, "%ld msgs, %ld MB\n", (int64_t)totmsgs, (int64_t)(totsend / 1024 / 1000));
-
-        fprintf(stderr, "\n\n");
-        fflush(stderr);
-        free(tab);
+	        fprintf(stderr, "%ld msgs, %ld MB\n", (int64_t)totmsgs, (int64_t)(totsend / 1024 / 1000));
+				
+	        fprintf(stderr, "\n\n");
+		    fflush(stderr);
+			free(tab);
+		}
     }
 }
 
@@ -904,23 +754,11 @@ extern mca_btl_base_descriptor_t* mca_btl_nc_alloc(
     uint32_t flags)
 {
     int peer = endpoint->peer_smp_rank;
-    uint32_t dst = mca_btl_nc_component.map[peer];
-    int peer_node = (dst >> 16);
-
-    bool local = (peer_node == mca_btl_nc_component.group);
-//local = false;
-
     uint32_t size8 = ((sizeof(mca_btl_nc_hdr_t) + size + 7) & ~7);
 
-    frag_t* frag = allocfrag(local ? size8 : RHDR_SIZE + size8);
-    if( !frag ) {
-        return 0;
-    }
-
+    frag_t* frag = allocfrag(RHDR_SIZE + size8);
     mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(frag + 1);
-    if( !local ) {
-        hdr = (mca_btl_nc_hdr_t*)((void*)hdr + RHDR_SIZE);
-    }
+    hdr = (mca_btl_nc_hdr_t*)((void*)hdr + RHDR_SIZE);
 
     hdr->frag = frag;
     hdr->base.des_src = &hdr->segment.base;
@@ -969,65 +807,22 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
                       mca_btl_base_tag_t tag,
                       mca_btl_base_descriptor_t** descriptor )
 {
-    int peer = endpoint->peer_smp_rank;
-    uint32_t dst = mca_btl_nc_component.map[peer];
-    int peer_node = (dst >> 16);
-    int dst_ndx = (dst & 0xffff);
+	int rc = OMPI_SUCCESS;
 
+    int peer = endpoint->peer_smp_rank;
     int size = header_size + payload_size;
     int size8 = ((size + 7) & ~7);
-
-    bool local = (peer_node == mca_btl_nc_component.group);
-//local = false;
-
-    if( local ) {
-        frag_t* frag = allocfrag(size8);
-        if( !frag ) {
-            // upper layers will call progress() first and than try sending again
-            return OMPI_ERR_RESOURCE_BUSY;
-        }
-        void* data = frag + 1;
-
-        if( header_size ) {
-            memcpy(data, header, header_size);
-        }
-
-        if( payload_size ) {
-            size_t max_data;
-            uint32_t iov_count = 1;
-            struct iovec iov;
-            iov.iov_len = max_data = payload_size;
-            iov.iov_base = data + header_size;
-
-            int rc = opal_convertor_pack(convertor, &iov, &iov_count, &max_data);
-            if( rc < 0 ) {
-                freefrag(frag);
-                // upper layers will call progress() first and than try sending again
-                return OMPI_ERR_RESOURCE_BUSY;
-            }
-        }
-
-        frag->msgtype = MSG_TYPE_ISEND;
-        frag->size = size;
-        frag->send = -1;
-        push_peerq(dst_ndx, frag);
-        return OMPI_SUCCESS;
-    }
-
-    // if there are already pending sends to peer, this message must be queued also
-    bool queued = mca_btl_nc_component.sendqcnt[peer];
 
     frag_t* frag = 0;
     assert( size <= MAX_EAGER_SIZE );
     uint8_t ALIGN8 txbuf[MAX_EAGER_SIZE];
     void* data = txbuf;
 
+    // if there are already pending sends to peer, this message must be queued also
+    bool queued = mca_btl_nc_component.sendqcnt[peer];
+
     if( queued ) {
         frag = allocfrag(RHDR_SIZE + size8);
-        if( !frag ) {
-            // upper layers will call progress() first and than try sending again
-            return OMPI_ERR_RESOURCE_BUSY;
-        }
         data = (void*)(frag + 1) + RHDR_SIZE;
     }
 
@@ -1046,33 +841,27 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
         if( rc < 0 ) {
             freefrag(frag);
             // upper layers will call progress() first and than try sending again
-            return OMPI_ERR_RESOURCE_BUSY;
+			rc = OMPI_ERR_RESOURCE_BUSY;
+			goto done;
         }
     }
 
     if( !queued ) {
         rhdr_t ALIGN8 rhdr;
         rhdr.type = MSG_TYPE_ISEND;
-        rhdr.dst_ndx = dst_ndx;
         rhdr.size = size;
 
-        bool rc = isend_msg(peer_node, &rhdr, data, size);
-        if( rc ) {
-            return OMPI_SUCCESS;
+        if( isend_msg(peer, &rhdr, data, size) ) {
+            goto done;
         }
-        do {
-            frag = allocfrag(RHDR_SIZE + size8);
-        } while( !frag );
-
+        frag = allocfrag(RHDR_SIZE + size8);
         data = (void*)(frag + 1) + RHDR_SIZE;
         memcpy(data, txbuf, size);
     }
 
     rhdr_t* rhdr = (rhdr_t*)(frag + 1);
-    rhdr->dst_ndx = dst_ndx;
     rhdr->size = size;
 
-    frag->node = peer_node;
     frag->msgtype = MSG_TYPE_ISEND;
     frag->size = size;
     frag->send = 0;
@@ -1087,11 +876,12 @@ int mca_btl_nc_sendi( struct mca_btl_base_module_t* btl,
 
     *descriptor = 0;
 
-    if( mca_btl_nc_component.statistics ) {
+done:
+    if( mca_btl_nc_component.statistics && (rc == OMPI_SUCCESS) ) {
         setstatistics(size);
     }
 
-    return OMPI_SUCCESS;
+    return rc;
 }
 
 
@@ -1111,8 +901,6 @@ struct mca_btl_base_descriptor_t* mca_btl_nc_prepare_src(
     uint32_t flags)
 {
     int peer = endpoint->peer_smp_rank;
-    uint32_t dst = mca_btl_nc_component.map[peer];
-    int peer_node = (dst >> 16);
 
     // reserve is used for specific header e.g. MATCH or RDMA headers
     int hdr_size = sizeof(mca_btl_nc_hdr_t) + reserve;
@@ -1122,10 +910,7 @@ struct mca_btl_base_descriptor_t* mca_btl_nc_prepare_src(
 
     frag_t* frag = allocfrag(RHDR_SIZE + size8);
 
-    bool local = (peer_node == mca_btl_nc_component.group);
-//local = false;
-
-    mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(local ? (void*)(frag + 1) : (void*)(frag + 1) + RHDR_SIZE);
+    mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)((void*)(frag + 1) + RHDR_SIZE);
 
     struct iovec iov;
     uint32_t iov_count = 1;
@@ -1134,7 +919,7 @@ struct mca_btl_base_descriptor_t* mca_btl_nc_prepare_src(
 
     frag->size = msgsize;
     frag->send = 0;
-    frag->msgtype = ((msgsize <= MAX_SEND_SIZE) || local) ? MSG_TYPE_FRAG : MSG_TYPE_BLK;
+    frag->msgtype = (msgsize <= MAX_SEND_SIZE) ? MSG_TYPE_FRAG : MSG_TYPE_BLK;
 
     size_t sz1;
     int rc = opal_convertor_pack(convertor, &iov, &iov_count, &sz1);
@@ -1161,7 +946,6 @@ struct mca_btl_base_descriptor_t* mca_btl_nc_prepare_src(
     if( mca_btl_nc_component.statistics ) {
         setstatistics(msgsize);
     }
-
     return &(hdr->base);
 }
 
@@ -1182,36 +966,21 @@ int mca_btl_nc_send( struct mca_btl_base_module_t* btl,
     hdr->endpoint = endpoint;
     hdr->src_rank = MY_RANK;
 
-    frag_t* frag = hdr->frag;
-
     int peer = endpoint->peer_smp_rank;
-    uint32_t dst = mca_btl_nc_component.map[peer];
-    int dst_ndx = (dst & 0xffff);
-    int peer_node = (dst >> 16);
 
-    bool local = (peer_node == mca_btl_nc_component.group);
-//local = false;
+    frag_t* frag = hdr->frag;
+    frag->peer = peer;
 
-    if( local ) {
-        frag->msgtype = MSG_TYPE_FRAG;
-        frag->send = -1;
-        push_peerq(dst_ndx, frag);
+    rhdr_t* rhdr = (rhdr_t*)(frag + 1);
+    rhdr->type = MSG_TYPE_FRAG;
+
+    if( mca_btl_nc_component.async_send ) {
+        push_sendq_async(peer, frag);
     }
     else {
-        frag->node = peer_node;
-        frag->peer = peer;
-
-        rhdr_t* rhdr = (rhdr_t*)(frag + 1);
-        rhdr->type = MSG_TYPE_FRAG;
-        rhdr->dst_ndx = dst_ndx;
-
-        if( mca_btl_nc_component.async_send ) {
-            push_sendq_async(peer, frag);
-        }
-        else {
-            push_sendq_sync(peer, frag);
-        }
+        push_sendq_sync(peer, frag);
     }
+
     return 1;
 }
 
@@ -1228,23 +997,7 @@ void mca_btl_nc_dump(struct mca_btl_base_module_t* btl,
 
 void sendack(int peer, frag_t* sfrag)
 {
-    uint32_t dst = mca_btl_nc_component.map[peer];
-    int peer_node = (dst >> 16);
-    int dst_ndx = (dst & 0xffff);
-
     int size = sizeof(void*);
-
-    bool local = (peer_node == mca_btl_nc_component.group);
-
-    if( local ) {
-        frag_t* frag = allocfrag(size);
-        frag->msgtype = MSG_TYPE_ACK;
-        frag->size = size;
-        frag->send = -1;
-        *(void**)(frag + 1) = sfrag;
-        push_peerq(dst_ndx, frag);
-        return;
-    }
 
     // if there are already pending sends to peer, this message must be queued also
     bool queued = mca_btl_nc_component.sendqcnt[peer];
@@ -1252,24 +1005,19 @@ void sendack(int peer, frag_t* sfrag)
     if( !queued ) {
         rhdr_t ALIGN8 rhdr;
         rhdr.type = MSG_TYPE_ACK;
-        rhdr.dst_ndx = dst_ndx;
         rhdr.size = size;
 
-        bool rc = isend_msg(peer_node, &rhdr, (void*)&sfrag, size);
-        if( rc ) {
-            return;
+        if( isend_msg(peer, &rhdr, (void*)&sfrag, size) ) {
+			goto done;
         }
     }
 
     frag_t* frag = allocfrag(RHDR_SIZE + size);
     rhdr_t* rhdr = (rhdr_t*)(frag + 1);
 
-    rhdr->dst_ndx = dst_ndx;
-
     uint8_t* data = (uint8_t*)(rhdr + 1);
     *(void**)data = sfrag;
 
-    frag->node = peer_node;
     frag->peer = peer;
     frag->size = size;
     frag->send = 0;
@@ -1282,6 +1030,7 @@ void sendack(int peer, frag_t* sfrag)
         push_sendq_sync(peer, frag);
     }
 
+done:
     if( mca_btl_nc_component.statistics ) {
         setstatistics(sizeof(void*));
     }
@@ -1293,14 +1042,15 @@ frag_t* allocfrag(int size)
     assert( (size > 0) && (size < MAX_MSG_SIZE + 1024) );
 
     int size8 = ((size + 7) & ~7) + sizeof(frag_t);
-
     // allocate frag in shared mem
     frag_t*  frag = (frag_t*)mca_btl_nc_component.shm_fragbase;
 
-    node_t* nodedesc = mca_btl_nc_component.nodedesc;
-    __semlock(&nodedesc->fraglock);
+    __semlock(&mca_btl_nc_component.fraglock);
 
+    struct msgstats_t* pstat = (struct msgstats_t*)mca_btl_nc_component.shm_stat;
     bool out_of_mem = false;
+	uint32_t hicnt = 0;
+	uint32_t hilvl = 0;
 
     for( ; ; ) {
         if( !frag->inuse && (frag->fsize >= size8) ) {
@@ -1311,17 +1061,21 @@ frag_t* allocfrag(int size)
             break;
         }
         if( frag->lastfrag ) {
-            __semunlock(&nodedesc->fraglock);
+            __semunlock(&mca_btl_nc_component.fraglock);
             if( !out_of_mem ) {
                 fprintf(stderr, "****WARNING : OUT OF FRAGMENT MEMORY, RANK %d\n", MY_RANK);
                 fflush(stderr);
             }
             usleep(4000000);
             frag = (frag_t*)mca_btl_nc_component.shm_fragbase;
-            __semlock(&nodedesc->fraglock);
+            __semlock(&mca_btl_nc_component.fraglock);
             out_of_mem = true;
+			hicnt = 0;
+			hilvl = 0;
             continue;
         }
+		++hicnt;
+		hilvl += frag->fsize;
 
         frag = (frag_t*)((uint8_t*)frag + frag->fsize);
     }
@@ -1349,12 +1103,7 @@ frag_t* allocfrag(int size)
 
     frag->inuse = true;
 
-    __semunlock(&nodedesc->fraglock);
-
-#ifndef NDEBUG
-    // to be able to identify buffers used after release
-    memset(frag + 1, 0x98, size8 - sizeof(frag_t));
-#endif
+    __semunlock(&mca_btl_nc_component.fraglock);
 
    return frag;
 }
@@ -1364,17 +1113,10 @@ void freefrag(frag_t* frag)
 {
     assert( (frag->fsize > 0) && (frag->fsize < MAX_MSG_SIZE + 1024) );
 
-#ifndef NDEBUG
-    // to be able to identify buffers used after release
-    memset(frag + 1, 0x99, frag->fsize - sizeof(frag_t));
-#endif
-
     int fsize = frag->fsize;
     bool last = frag->lastfrag;
 
-    node_t* nodedesc = mca_btl_nc_component.nodedesc;
-
-    __semlock(&nodedesc->fraglock);
+    __semlock(&mca_btl_nc_component.fraglock);
 
     if( !last ) {
         frag_t* next = (frag_t*)((void*)frag + fsize);
@@ -1401,54 +1143,24 @@ void freefrag(frag_t* frag)
         next->prevsize = fsize;
     }
 
-    __semunlock(&nodedesc->fraglock);
-}
-
-
-// append to fifo list, multiple producers, single consumer
-static void push_peerq(int peer, frag_t* frag)
-{
-    frag->next = 0;
-    frag = (frag_t*)NODEADDR(frag);
-
-    fifolist_t* list = mca_btl_nc_component.inq + peer;
-
-    __semlock(&list->lock);
-
-    if( list->head ) {
-        frag_t* tail = (frag_t*)PROCADDR(list->tail);
-        tail->next = frag;
-    }
-    else {
-        list->head = frag;
-    }
-    list->tail = frag;
-
-    __semunlock(&list->lock);
+    __semunlock(&mca_btl_nc_component.fraglock);
 }
 
 
 // sending asynchronouly with send thread
 static void push_sendq_async(int peer, frag_t* frag)
 {
-    fifolist_t* list = mca_btl_nc_component.pending_sends;
-    node_t* nodedesc = mca_btl_nc_component.nodedesc;
+    fifolist_t* list = &mca_btl_nc_component.pending_sends;
     frag->next = 0;
 
     int msgtype = frag->msgtype;
 
-    if( mca_btl_nc_component.shared_queues ) {
-        // shared send list
-        frag = (frag_t*)NODEADDR(frag);
-    }
+    pthread_mutex_lock(&mca_btl_nc_component.send_mutex);
 
-    pthread_mutex_lock(&nodedesc->send_mutex);
-
+	__semlock(&mca_btl_nc_component.sendlock);
+         
     if( list->head ) {
         frag_t* tail = list->tail;
-        if( mca_btl_nc_component.shared_queues ) {
-            tail = (frag_t*)PROCADDR(tail);
-        }
         tail->next = frag;
     }
     else {
@@ -1456,107 +1168,74 @@ static void push_sendq_async(int peer, frag_t* frag)
     }
     list->tail = frag;
 
-    pthread_mutex_unlock(&nodedesc->send_mutex);
+    if( frag->msgtype == MSG_TYPE_ISEND ) {
+        ++mca_btl_nc_component.sendqcnt[peer];
+    }
+	__semunlock(&mca_btl_nc_component.sendlock);
+
+    pthread_mutex_unlock(&mca_btl_nc_component.send_mutex);
 
     // signal send thread
-    pthread_cond_signal(&nodedesc->send_cond);
-
-    if( msgtype == MSG_TYPE_ISEND ) {
-        lockedAdd(&mca_btl_nc_component.sendqcnt[peer], 1);
-    }
+    pthread_cond_signal(&mca_btl_nc_component.send_cond);
 }
 
 
 // sending synchronouly without send thread
 static void push_sendq_sync(int peer, frag_t* frag)
 {
-    fifolist_t* list = mca_btl_nc_component.pending_sends;
+    fifolist_t* list = &mca_btl_nc_component.pending_sends;
 
-    if( mca_btl_nc_component.shared_queues ) {
-        // shared send list
+    // peer to peer, non shared send list
+    frag->next = 0;
 
-        int msgtype = frag->msgtype;
-        frag->next = 0;
-        frag = (frag_t*)NODEADDR(frag);
+    __semlock(&mca_btl_nc_component.sendlock);
 
-        __semlock(&list->lock);
-
-        if( list->head ) {
-            frag_t* tail = (frag_t*)PROCADDR(list->tail);
-            tail->next = frag;
-        }
-        else {
-            list->head = frag;
-        }
-        list->tail = frag;
-
-        if( msgtype == MSG_TYPE_ISEND ) {
-            ++mca_btl_nc_component.sendqcnt[peer];
-        }
-
-        __semunlock(&list->lock);
+    if( list->head ) {
+        list->tail->next = frag;
     }
     else {
-        // peer to peer, non shared send list
-        frag->next = 0;
-
-        if( list->head ) {
-            list->tail->next = frag;
-        }
-        else {
-            list->head = frag;
-        }
-        list->tail = frag;
-
-        if( frag->msgtype == MSG_TYPE_ISEND ) {
-            ++mca_btl_nc_component.sendqcnt[peer];
-        }
+        list->head = frag;
     }
+    list->tail = frag;
+
+    if( frag->msgtype == MSG_TYPE_ISEND ) {
+        ++mca_btl_nc_component.sendqcnt[peer];
+    }
+
+    __semunlock(&mca_btl_nc_component.sendlock);
 }
 
 
-static void init_ring(int peer_node)
+static void init_ring(int peer)
 {
-    int loc_node = mca_btl_nc_component.group;
+	void* shm = mca_btl_nc_component.shm_base[peer];
+	ring_t* ring = (ring_t*)shm;
 
-    void* ring_addr = mca_btl_nc_component.shm_base + mca_btl_nc_component.sysctxt->ring_ofs[peer_node];
-    ring_addr += (loc_node * RING_SIZE);
+	int ndx = 0;
+	for( ; ; ) {
+		if( __sync_bool_compare_and_swap(&ring->peer, -1, MY_RANK) ) {
+			break;
+		}
+		++ndx;
+		++ring;
+	}
 
-    volatile pring_t* pr = mca_btl_nc_component.peer_ring + peer_node;
-    if( !pr->commited ) {
-
-        __semlock(&pr->lock);
-
-        if( !pr->commited ) {
-            pr->commited = true;
-
-            node_t* peer_nodedesc = mca_btl_nc_component.peer_node[peer_node];
-
-            int n = __sync_add_and_fetch(&peer_nodedesc->ring_cnt, 1);
-
-            peer_nodedesc->ring[n - 1].ndx = loc_node + 1;
-
-            __sfence();
-        }
-        __semunlock(&pr->lock);
-    }
-
-    mca_btl_nc_component.peer_ring_buf[peer_node] = ring_addr;
+	mca_btl_nc_component.peer_ring_buf[peer] = shm + mca_btl_nc_component.ring_ofs + (MY_RANK * RING_SIZE);	
 }
 
 
-static rhdr_t* allocring(int peer_node, int size, int* sbit)
+static rhdr_t* allocring(int peer, int size, int* sbit)
 {
     int size8 = ((size + 7) & ~7);
     int ssize = syncsize(size8);
     int rsize = RHDR_SIZE + ssize + size8;
 
-    void* ring_buf = mca_btl_nc_component.peer_ring_buf[peer_node];
+    void* ring_buf = mca_btl_nc_component.peer_ring_buf[peer];
 
     if( !ring_buf ) {
         // map target nodes rings address space
-        init_ring(peer_node);
-        ring_buf = mca_btl_nc_component.peer_ring_buf[peer_node];
+        init_ring(peer);
+        ring_buf = mca_btl_nc_component.peer_ring_buf[peer];
         assert( ring_buf );
     }
 
@@ -1564,12 +1243,10 @@ static rhdr_t* allocring(int peer_node, int size, int* sbit)
     uint8_t* buf = 0;
 
     // peer ring descriptor is in shared mem
-    volatile pring_t* pr = mca_btl_nc_component.peer_ring + peer_node;
+    volatile pring_t* pr = mca_btl_nc_component.peer_ring + peer;
 
-    __semlock(&pr->lock);
-
+    uint32_t tail = pr->stail;
     uint32_t head = pr->head;
-    uint32_t tail = *(mca_btl_nc_component.stail[peer_node]);
 
     if( head >= tail ) {
         if( head + rsize + RING_GUARD <= RING_SIZE ) {
@@ -1601,16 +1278,13 @@ static rhdr_t* allocring(int peer_node, int size, int* sbit)
         }
     }
 
-    __semunlock(&pr->lock);
-
     return (rhdr_t*)buf;
 }
 
 
 static void ringbind()
 {
-    sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
-    int max_nodes = sysctxt->max_nodes;
+    int rank_count = mca_btl_nc_component.num_smp_procs;
 
     // bind all ring address space to local node
     // it will be commited from remote
@@ -1621,7 +1295,7 @@ static void ringbind()
     numa_bitmask_setbit(mask, mynode);
 
     void* rings = mca_btl_nc_component.shm_ringbase;
-    int rc = syscall(__NR_mbind, (long)rings, max_nodes * RING_SIZE, MPOL_BIND, (long)mask->maskp, mask->size, 0);
+    int rc = syscall(__NR_mbind, (long)rings, rank_count * RING_SIZE, MPOL_BIND, (long)mask->maskp, mask->size, 0);
     assert( rc >= 0 );
     if( rc < 0 ) {
         fprintf(stderr, "WARNING : MBIND FAILED...\n");
@@ -1629,181 +1303,6 @@ static void ringbind()
     }
 
     numa_bitmask_free(mask);
-}
-
-
-static void send_async_p2p(int qndx)
-{
-    node_t* nodedesc = mca_btl_nc_component.nodedesc;
-    pthread_cond_t* sendq_cond = &nodedesc->send_cond;
-    pthread_mutex_t* sendq_mutex = &nodedesc->send_mutex;
-
-    int32_t* sendqcnt = mca_btl_nc_component.sendqcnt;
-    volatile fifolist_t* list = mca_btl_nc_component.pending_sends + qndx;
-
-    volatile bool* active = &nodedesc->active;
-
-    while( *active ) {
-
-        if( !list->head && !pthread_mutex_trylock(sendq_mutex) ) {
-            while( !list->head ) {
-                // pthread_cond_wait() unlocks the mutex. thus you must
-                // always have ownership of the mutex before invoking it
-                // pthread_cond_wait() returns with the mutex locked
-                pthread_cond_wait(sendq_cond, sendq_mutex);
-                if( !*active ) {
-                    return;
-                }
-            }
-            pthread_mutex_unlock(sendq_mutex);
-        }
-
-        frag_t* frag = list->head;
-
-        while( frag ) {
-
-            int peer_node = frag->node;
-            int type = frag->msgtype;
-            int peer = frag->peer;
-
-            // takeout of send list
-            if( frag->next ) {
-                list->head = frag->next;
-            }
-            else {
-                pthread_mutex_lock(sendq_mutex);
-                list->head = frag->next;
-                pthread_mutex_unlock(sendq_mutex);
-            }
-
-            if( send_msg(frag) ) {
-
-                if( type == MSG_TYPE_ISEND ) {
-                    lockedAdd(&sendqcnt[peer], -1);
-                }
-
-                if( type == MSG_TYPE_ISEND || type == MSG_TYPE_ACK ) {
-                    freefrag(frag);
-                }
-            }
-            else {
-                // send failed or not completely done,
-                // prepend to send list again
-                pthread_mutex_lock(sendq_mutex);
-                frag->next = list->head;
-                list->head = frag;
-                pthread_mutex_unlock(sendq_mutex);
-            }
-
-            frag = list->head;
-        }
-    }
-}
-
-
-static void send_async_sharedq(int qndx)
-{
-    node_t* nodedesc = mca_btl_nc_component.nodedesc;
-    pthread_cond_t* sendq_cond = &nodedesc->send_cond;
-    pthread_mutex_t* sendq_mutex = &nodedesc->send_mutex;
-
-    int32_t* sendqcnt = mca_btl_nc_component.sendqcnt;
-    volatile fifolist_t* list = mca_btl_nc_component.pending_sends + qndx;
-
-    volatile bool* active = &nodedesc->active;
-
-    volatile sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
-    int node_count = sysctxt->node_count;
-
-    bool* skip = (bool*)malloc(sysctxt->max_nodes * sizeof(bool));
-    memset(skip, 0, node_count * sizeof(bool));
-
-    fifolist_t pending;
-    pending.head = 0;
-
-    while( *active ) {
-
-        if( !list->head && !pthread_mutex_trylock(sendq_mutex) ) {
-            while( !list->head ) {
-                // pthread_cond_wait() unlocks the mutex. thus you must
-                // always have ownership of the mutex before invoking it
-                // pthread_cond_wait() returns with the mutex locked
-                pthread_cond_wait(sendq_cond, sendq_mutex);
-                if( !*active ) {
-                    return;
-                }
-            }
-            pthread_mutex_unlock(sendq_mutex);
-        }
-
-        frag_t* frag = list->head;
-
-        // send all pending sends
-        // if message can not be send, skip traget for all
-        // messages to this target node in this round
-        while( frag ) {
-
-            assert( frag->node < node_count );
-
-            // takeout of send list
-            if( frag->next ) {
-                list->head = frag->next;
-            }
-            else {
-                pthread_mutex_lock(sendq_mutex);
-                list->head = frag->next;
-                pthread_mutex_unlock(sendq_mutex);
-            }
-
-            frag_t* next = frag->next;
-            int type = frag->msgtype;
-            int peer = frag->peer;
-
-            if( !skip[frag->node] && send_msg(frag) ) {
-
-                if( type == MSG_TYPE_ISEND ) {
-                    lockedAdd(&sendqcnt[peer], -1);
-                }
-
-                if( type == MSG_TYPE_ISEND || type == MSG_TYPE_ACK ) {
-                    freefrag(frag);
-                }
-            }
-            else {
-                skip[frag->node] = true;
-
-                // send failed or not completely done,
-                // apend to pending list
-                frag->next = 0;
-                if( pending.head ) {
-                    pending.tail->next = frag;
-                }
-                else {
-                    pending.head = frag;
-                }
-                pending.tail = frag;
-            }
-
-            frag = next;
-        }
-
-        if( pending.head ) {
-            // prepend pending list to send list
-            pthread_mutex_lock(sendq_mutex);
-
-            pending.tail->next = list->head;
-
-            if( !list->head ) {
-                list->tail = pending.tail;
-            }
-            list->head = pending.head;
-
-            pthread_mutex_unlock(sendq_mutex);
-
-            pending.head = 0;
-            memset(skip, 0, node_count * sizeof(bool));
-        }
-    }
 }
 
 
@@ -1826,88 +1325,115 @@ static void* send_thread(void* arg)
         }
     }
 
-    int qndx = (int)(uint64_t)arg;
-
-    node_t* nodedesc = mca_btl_nc_component.nodedesc;
-
-    pthread_cond_t* sendq_cond = &nodedesc->send_cond;
+    pthread_cond_t* sendq_cond = &mca_btl_nc_component.send_cond;
     pthread_condattr_t cond_attr;
     pthread_condattr_init(&cond_attr);
-    if( mca_btl_nc_component.shared_queues ) {
-        pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
-    }
     pthread_cond_init(sendq_cond, &cond_attr);
 
     __sfence();
 
-    volatile sysctxt_t* sysctxt = mca_btl_nc_component.sysctxt;
-    while( sysctxt->rank_count < sysctxt->num_smp_procs );
-
-    nodedesc->active = 1;
+    mca_btl_nc_component.send_thread_active = 1;
     __sfence();
 
-    if( mca_btl_nc_component.shared_queues ) {
-        send_async_sharedq(qndx);
-    }
-    else {
-        send_async_p2p(qndx);
-    }
+    pthread_mutex_t* sendq_mutex = &mca_btl_nc_component.send_mutex;
 
+    int32_t* sendqcnt = mca_btl_nc_component.sendqcnt;
+    volatile fifolist_t* list = &mca_btl_nc_component.pending_sends;
+
+    volatile bool* active = &mca_btl_nc_component.send_thread_active;
+
+    while( *active ) {
+
+        if( !list->head && !pthread_mutex_trylock(sendq_mutex) ) {
+            while( !list->head ) {
+                // pthread_cond_wait() unlocks the mutex. thus you must
+                // always have ownership of the mutex before invoking it
+                // pthread_cond_wait() returns with the mutex locked
+                pthread_cond_wait(sendq_cond, sendq_mutex);
+                if( !*active ) {
+                    break;
+                }
+            }
+            pthread_mutex_unlock(sendq_mutex);
+        }
+
+        frag_t* frag = list->head;
+
+        while( frag && __semtrylock(&mca_btl_nc_component.sendlock) ) {
+
+			frag_t* dofree = 0;
+			frag = list->head;
+
+			if( frag ) {
+
+				int type = frag->msgtype;
+				int peer = frag->peer;
+				frag_t* next = frag->next;
+
+				if( send_msg(frag) ) {
+
+					// takeout of send list
+					list->head = next;
+
+					if( type == MSG_TYPE_ISEND ) {
+						--sendqcnt[peer];
+					}
+
+					if( type == MSG_TYPE_ISEND || type == MSG_TYPE_ACK ) {
+						dofree = frag;
+					}
+				}
+			}
+			__semunlock(&mca_btl_nc_component.sendlock);
+
+			if( dofree ) {
+				freefrag(dofree);
+			}
+
+			frag = list->head;
+        }
+    }
     return NULL;
 }
 
 
-void send_sync_p2p()
+void send_sync()
 {
-    fifolist_t* list = mca_btl_nc_component.pending_sends;
-    frag_t* frag = list->head;
+    fifolist_t* list = &mca_btl_nc_component.pending_sends;
 
-    if( frag && send_msg(frag) ) {
+	frag_t* dofree = 0;
 
-        list->head = frag->next;
-        int type = frag->msgtype;
+    if( __semtrylock(&mca_btl_nc_component.sendlock) ) {
 
-        if( type == MSG_TYPE_ISEND || type == MSG_TYPE_ACK ) {
-            freefrag(frag);
+		frag_t* frag = list->head;
 
-            if( type == MSG_TYPE_ISEND ) {
-                --mca_btl_nc_component.sendqcnt[frag->peer];
-            }
-        }
-    }
-}
+		if( frag ) {
 
+			// ! dont access frag after it is sent, it might be freed already
+			frag_t* next = frag->next;
+			int type = frag->msgtype;
+			int peer = frag->peer;
 
-void send_sync_sharedq()
-{
-    fifolist_t* list = mca_btl_nc_component.pending_sends;
+			if( send_msg(frag) ) {
 
-    if( __semtrylock(&list->lock) ) {
-        frag_t* frag = list->head;
-        int type, peer;
-        bool done = false;
+				list->head = next;
 
-        if( frag ) {
-            frag = (frag_t*)PROCADDR(frag);
-            frag_t* next = frag->next;
-            type = frag->msgtype;
-            peer = frag->peer;
+				if( type == MSG_TYPE_ISEND ) {
+					--mca_btl_nc_component.sendqcnt[peer];
+				}
 
-            if( send_msg(frag) ) {
-                list->head = next;
-                done = true;
+				if( type == MSG_TYPE_ISEND || type == MSG_TYPE_ACK ) {
+					dofree = frag;
+				}
+			}
+		}
 
-                if( type == MSG_TYPE_ISEND ) {
-                    --mca_btl_nc_component.sendqcnt[peer];
-                }
-            }
-        }
-        __semunlock(&list->lock);
+		__semunlock(&mca_btl_nc_component.sendlock);
 
-        if( done && ((type == MSG_TYPE_ISEND) || (type == MSG_TYPE_ACK)) ) {
-            freefrag(frag);
-        }
-    }
+		if( dofree ) {
+			freefrag(dofree);
+		}
+	}
 }
 
 
@@ -1923,7 +1449,7 @@ static bool send_msg(frag_t* frag)
     rhdr_t* hdr = (rhdr_t*)(frag + 1);
     const uint64_t* p = (uint64_t*)((void*)(hdr + 1) + frag->send);
 
-    int peer_node = frag->node;
+    int peer = frag->peer;
     int type = frag->msgtype;
 
     for( ; ; ) {
@@ -1931,7 +1457,7 @@ static bool send_msg(frag_t* frag)
         assert( size > 0 );
 
         int sbit;
-        rhdr_t* rhdr = (rhdr_t*)allocring(peer_node, size, &sbit);
+        rhdr_t* rhdr = (rhdr_t*)allocring(peer, size, &sbit);
         if( !rhdr ) {
             break;
         }
@@ -1977,7 +1503,7 @@ static bool send_msg(frag_t* frag)
         n -= k;
 
         if( n ) {
-            scopy2(q, p, n << 3, sbit);
+            scopy(q, p, n << 3, sbit);
             p += n;
         }
 
@@ -2008,9 +1534,12 @@ static bool isend_msg(int node, rhdr_t* hdr, void* buf, int size)
     int size8 = ((size + 7) & ~7);
     int n = (size8 >> 3);
 
+	__semlock(&mca_btl_nc_component.sendlock);
+
     int sbit;
     rhdr_t* rhdr = (rhdr_t*)allocring(node, size, &sbit);
     if( !rhdr ) {
+		__semunlock(&mca_btl_nc_component.sendlock);
         return false;
     }
 
@@ -2049,13 +1578,15 @@ static bool isend_msg(int node, rhdr_t* hdr, void* buf, int size)
     n -= k;
 
     if( n ) {
-        scopy2(q, p, n << 3, sbit);
+        scopy(q, p, n << 3, sbit);
     }
 
     __asm__ __volatile__ ("sfence\n");
+
+	__semunlock(&mca_btl_nc_component.sendlock);
+
     return true;
 }
-
 
 
 static void scopy(void* dst, const void* src, int size, int sbit)
@@ -2104,60 +1635,6 @@ static void scopy(void* dst, const void* src, int size, int sbit)
         ++q;
 
         n -= k;
-    }
-}
-
-
-static void scopy2(void* dst, const void* src, int size, int sbit)
-{
-    assert( ((uint64_t)dst & 0x7) == 0 );
-    assert( ((uint64_t)src & 0x3) == 0 );
-    assert( (size > 0) && ((size & 7) == 0) );
-    assert( (sbit == 0) || (sbit == 1) );
-
-    int size8 = ((size + 7) & ~7);
-    int n = (size8 >> 3);
-
-    const uint64_t* p = (uint64_t*)src;
-    uint64_t* q = (uint64_t*)dst;
-
-    uint64_t sb = sbit;
-
-    while( n ) {
-        int k = n;
-        if( k > 63 ) {
-            k = 63;
-        }
-        n -= k;
-
-        __asm__ __volatile__
-            ("movl %2, %%ecx\n"      // k -> ecx
-             "xorq %%rbx, %%rbx\n"   // 0 -> rbx
-             "movq %3, %%r8\n"       // sbit -> r8
-             "movq %4, %%rsi\n"      // p -> rsi
-             "movq %5, %%rdi\n"      // q -> rdi
-             "1:\n"                  // for k
-             "movq (%%rsi), %%rax\n" // *p->rax
-             "shlq $1, %%rbx\n"      // b <<= 1
-             "movq %%rax, %%rdx\n"   // rax -> rdx
-             "shrq $1, %%rax\n"              // ax <<= 1
-             "shlq $1, %%rax\n"              // ax >>= 1
-             "orq  %%r8, %%rax\n"    // z |= sbit
-             "movnti %%rax, (%%rdi)\n" // z -> *q
-             "andq $1, %%rdx\n"      // dx &= 1
-             "orq  %%rdx, %%rbx\n"   // b |= (z & 1)
-             "addq $8, %%rsi\n"      // ++p
-             "addq $8, %%rdi\n"      // ++q
-             "loop 1b\n"                             // next k
-             "shlq $1, %%rbx\n"              // b <<= 1
-             "orq  %%r8, %%rbx\n"    // b |= sbit
-             "movnti %%rbx, (%%rdi)\n" // b -> *q
-             "addq $8, %%rdi\n"      // ++q
-             "movq %%rsi, %0\n"
-             "movq %%rdi, %1\n"
-             : "=r" (p), "=r" (q)
-             : "r" (k), "r" (sb), "r" (p), "r" (q)
-             : "ecx", "rax", "rbx", "rdx", "rsi", "rdi", "r8");
     }
 }
 

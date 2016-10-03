@@ -141,13 +141,6 @@ static int nc_register(void)
                                     OPAL_INFO_LVL_9, MCA_BASE_VAR_SCOPE_READONLY,
                                     &mca_btl_nc_component.async_send);
 
-    mca_btl_nc_component.shared_queues = -1;
-    mca_base_component_var_register(&mca_btl_nc_component.super.btl_version,
-                                    "shared_queues", "Whether or not to enable shared queues",
-                                    MCA_BASE_VAR_TYPE_UNSIGNED_INT, NULL, 0, 0,
-                                    OPAL_INFO_LVL_9, MCA_BASE_VAR_SCOPE_READONLY,
-                                    &mca_btl_nc_component.shared_queues);
-
     return mca_btl_nc_component_verify();
 }
 
@@ -170,7 +163,7 @@ static int mca_btl_nc_component_close(void)
 {
     if( (uint64_t)mca_btl_nc_component.sendthread ) {
 
-        mca_btl_nc_component.nodedesc->active = 0;
+        mca_btl_nc_component.send_thread_active = 0;
         __sfence();
 
         pthread_join(mca_btl_nc_component.sendthread, 0);
@@ -221,41 +214,14 @@ mca_btl_base_module_t** mca_btl_nc_component_init(
 static void fifo_push_back(fifolist_t* list, frag_t* frag)
 {
     frag->next = 0;
-    frag = (frag_t*)NODEADDR(frag);
-
-    __semlock(&list->lock);
 
     if( list->head ) {
-        frag_t* tail = (frag_t*)PROCADDR(list->tail);
-        tail->next = frag;
+        list->tail->next = frag;
     }
     else {
         list->head = frag;
     }
     list->tail = frag;
-
-    __semunlock(&list->lock);
-}
-
-
-static void processlist()
-{
-    fifolist_t* list = mca_btl_nc_component.myinq;
-    assert( list->head );
-
-    frag_t* frag = list->head;
-    frag = (frag_t*)PROCADDR(frag);
-
-    if( frag->next ) {
-        list->head = frag->next;
-    }
-    else {
-        __semlock(&list->lock);
-        list->head = frag->next;
-        __semunlock(&list->lock);
-    }
-
-    processmsg(frag);
 }
 
 
@@ -264,46 +230,55 @@ int mca_btl_nc_component_progress(void)
     volatile fifolist_t* list = mca_btl_nc_component.myinq;
 
     if( list->head ) {
-        processlist();
-        return 1;
+
+		__semlock(&mca_btl_nc_component.recvlock);
+		frag_t* frag = list->head;
+		if( frag ) {
+			list->head = frag->next;
+		}
+		__semunlock(&mca_btl_nc_component.recvlock);
+
+		if( frag ) {
+			processmsg(frag);
+			return 1;
+		}
     }
 
-    bool qshared = mca_btl_nc_component.shared_queues;
-    volatile node_t* nodedesc = mca_btl_nc_component.nodedesc;
-    volatile ring_t* ring = nodedesc->ring;
-    int ring_cnt = (int)nodedesc->ring_cnt;
-    void* ring_base = mca_btl_nc_component.shm_ringbase;
 
-    for( int i = 0; i < ring_cnt; i++ ) {
+    volatile ring_t* ring = (ring_t*)mca_btl_nc_component.shm_base[MY_RANK];
+    void* ring_base = mca_btl_nc_component.shm_ringbase;
+	ring_t* ring_end = (ring_t*)ring + mca_btl_nc_component.num_smp_procs;
+
+	frag_t* frag = 0;
+
+    __semlock(&mca_btl_nc_component.recvlock);
+
+	// all rings
+	while( (ring < ring_end) && (ring->peer >= 0) ) {
 
 //      __builtin_prefetch((void*)(ring + 1));
 
-        int rndx = ring->ndx - 1;
+		ring_t* r = (ring_t*)ring;
+        int peer = ring->peer;
 
-        if( (rndx < 0) || (qshared && !__semtrylock(&ring->lock)) ) {
-            ++ring;
-            continue;
-        }
+        int sbit = ((ring->sbit) ^ 1);
+        uint32_t rtail = ring->tail;
+        volatile rhdr_t* rhdr = (rhdr_t*)(ring_base + (peer << RING_SIZE_LOG2) + rtail);
 
-        ring_t* r = (ring_t*)ring;
-
-        int sbit = ((r->sbit) ^ 1);
-        uint32_t rtail = r->tail;
-        volatile rhdr_t* rhdr = (rhdr_t*)(ring_base + (rndx << RING_SIZE_LOG2) + rtail);
-
+		// all messages in current ring
         for( ; ; ) {
 
             int type = rhdr->type;
 
             if( (type & 1) != sbit ) {
-
+				 
                 // no message
                 int32_t z0 = r->ttail;
                 int32_t z1 = (rtail >> (RING_SIZE_LOG2 - 2));
                 assert( z1 <= 3 ); // do 3 intermediate ring resets
                 if( z1 > z0 ) {
                     // reset remote tail
-                    uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
+                    uint32_t* ptail = mca_btl_nc_component.peer_stail[peer];
                     __nccopy4(ptail, rtail);
                     r->ttail = z1;
                 }
@@ -317,27 +292,21 @@ int mca_btl_nc_component_progress(void)
 
             if( type != MSG_TYPE_RST ) {
 
-                bool done = false;
-                frag_t* frag;
-
                 if( !(type & MSG_TYPE_BLK) ) {
                     frag = allocfrag(size8);
-                    if( !frag ) {
-                        break;
-                    }
-
                     frag->msgtype = type;
                     frag->size = size;
                     frag->send = size;
 
                     read_msg(frag + 1, r, (rhdr_t*)rhdr, sbit);
-                    done = true;
                 }
                 else {
-                    frag = nodedesc->recvfrag[rndx];
-                    if( !frag ) {
-                        // frag is first chunk of a multi chunk message
+                    // frag is first chunk of a multi chunk message
 
+                    frag = mca_btl_nc_component.recvfrag[peer];
+
+                    if( !frag ) {
+						// first chunc 
                         mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(rhdr + 1);
 
                         volatile uint64_t* p = (uint64_t*)(rhdr + 1);
@@ -350,22 +319,14 @@ int mca_btl_nc_component_progress(void)
                             ++p;
                         }
 
+						assert( offsetof(struct mca_btl_nc_hdr_t, size) % 8 != 0 );
                         int totSize = hdr->size;
-                        totSize &= ~1;
 
                         frag = allocfrag(totSize);
-                        if( !frag ) {
-                            return 0;
-                        }
 
-                        nodedesc->recvfrag[rndx] = (void*)NODEADDR(frag);
+                        mca_btl_nc_component.recvfrag[peer] = frag;
                         frag->size = 0;
                         frag->send = totSize;
-                    }
-                    else {
-                        frag = nodedesc->recvfrag[rndx];
-                        assert( frag );
-                        frag = (frag_t*)PROCADDR(frag);
                     }
 
                     void* dst = (void*)(frag + 1) + frag->size;
@@ -376,25 +337,21 @@ int mca_btl_nc_component_progress(void)
 
                     if( frag->size == frag->send ) {
                         frag->msgtype = MSG_TYPE_FRAG;
-                        nodedesc->recvfrag[rndx] = 0;
-                        done = true;
+                        mca_btl_nc_component.recvfrag[peer] = 0;
                     }
+					else {
+						frag = 0;
+					}
                 }
                 int rsize = RHDR_SIZE + syncsize(size8) + size8;
                 rtail += rsize;
 
-                if( done ) {
-                    if( rhdr->dst_ndx == mca_btl_nc_component.cpuindex ) {
-                        fifo_push_back((fifolist_t*)list, frag);
-                    }
-                    else {
-                        fifolist_t* list = mca_btl_nc_component.inq + rhdr->dst_ndx;
-                        fifo_push_back((fifolist_t*)list, frag);
-                    }
-                    break;
-                }
+                if( frag ) {
+					break;
+				}
+
+				// next msg in current ring
                 rhdr = (rhdr_t*)((uint8_t*)rhdr + rsize);
-                break;
             }
             else {
                 // handle ring reset marker
@@ -404,11 +361,11 @@ int mca_btl_nc_component_progress(void)
                     memset8((uint8_t*)rhdr, sbit, n);
                 }
                 // use one cache line per counter
-                uint32_t* ptail = mca_btl_nc_component.peer_stail[rndx] + mca_btl_nc_component.group;
+                uint32_t* ptail = mca_btl_nc_component.peer_stail[peer];
                 __nccopy4(ptail, 0);
 
                 rtail = 0;
-                rhdr = (rhdr_t*)(ring_base + (rndx << RING_SIZE_LOG2));
+                rhdr = (rhdr_t*)(ring_base + (peer << RING_SIZE_LOG2));
 
                 r->ttail = 0;
                 r->sbit = sbit;
@@ -417,26 +374,24 @@ int mca_btl_nc_component_progress(void)
         }
 
         r->tail = rtail;
-        __semunlock(&r->lock);
 
-        if( list->head ) {
-            break;
-        }
-
+		if( frag ) {
+			break;
+		}
         ++ring;
     }
-    if( list->head ) {
-        processlist();
-        return 1;
+
+    __semunlock(&mca_btl_nc_component.recvlock);
+
+	if( frag ) {
+		processmsg(frag);
+		return 1;
+	}
+
+    if( !mca_btl_nc_component.async_send && mca_btl_nc_component.pending_sends.head ) {
+        send_sync();
     }
-    if( !mca_btl_nc_component.async_send && mca_btl_nc_component.pending_sends->head ) {
-        if( qshared ) {
-            send_sync_sharedq();
-        }
-        else {
-            send_sync_p2p();
-        }
-    }
+
     return 0;
 }
 
@@ -462,8 +417,6 @@ static void processmsg(frag_t* frag)
             mca_btl_base_active_message_trigger + MCA_PML_OB1_HDR_TYPE_MATCH;
 
         mreg->cbfunc(&mca_btl_nc.super, MCA_PML_OB1_HDR_TYPE_MATCH, &(msg.base), mreg->cbdata);
-
-        freefrag(frag);
     }
     else
     if( type == MSG_TYPE_FRAG ) {
@@ -481,17 +434,8 @@ static void processmsg(frag_t* frag)
 
         reg->cbfunc(&mca_btl_nc.super, hdr->tag, &(msg.base), reg->cbdata);
 
-        bool ring_frag = (frag->send >= 0);
-
         assert( hdr->frag );
         sendack(hdr->src_rank, hdr->frag);
-
-        // if fragment was allocated in receive from ring then
-        // deallocate it here. otherwise it was alocated by sender and
-        // will be deallocated after ack message on sender side
-        if( ring_frag ) {
-            freefrag(frag);
-        }
     }
     else {
         assert( type == MSG_TYPE_ACK );
@@ -499,18 +443,16 @@ static void processmsg(frag_t* frag)
         // sender fragment
         frag_t* sfrag = *(frag_t**)(frag + 1);
 
-        mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)(sfrag + 1);
-        if( sfrag->send >= 0 ) {
-            hdr = (mca_btl_nc_hdr_t*)((void*)hdr + RHDR_SIZE);
-        }
+        mca_btl_nc_hdr_t* hdr = (mca_btl_nc_hdr_t*)((void*)sfrag + sizeof(frag_t) + RHDR_SIZE);
 
         if( MCA_BTL_DES_SEND_ALWAYS_CALLBACK & hdr->base.des_flags ) {
             hdr->base.des_cbfunc(&mca_btl_nc.super, hdr->endpoint, &hdr->base, OMPI_SUCCESS);
         }
 
         freefrag(sfrag);
-        freefrag(frag);
     }
+
+    freefrag(frag);
 }
 
 
