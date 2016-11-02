@@ -54,7 +54,7 @@ BEGIN_C_DECLS
 
 
 #define NC_CLSIZE (64)   // cache line size
-#define MAX_PROCS (256) 
+#define MAX_PROCS (256)
 
 #define MAX_EAGER_SIZE (15 * 1024)
 #define MAX_SEND_SIZE  (16 * 1024)
@@ -220,11 +220,11 @@ typedef struct ring {
 
 
 typedef struct {
-	uint32_t stail;
-	int32_t  pad1[15];
+    uint32_t stail;
+    int32_t  pad1[15];
     uint32_t head;
     int32_t  sbit;
-	int32_t  pad2[14];
+    int32_t  pad2[14];
 } pring_t;
 
 
@@ -242,9 +242,9 @@ struct mca_btl_nc_component_t {
     pthread_t   sendthread;
     volatile bool send_thread_active;
 
-	int32_t     fraglock ALIGN8;
-	int32_t     sendlock ALIGN8;
-	int32_t     recvlock ALIGN8;
+    int32_t     fraglock ALIGN8;
+    int32_t     sendlock ALIGN8;
+    int32_t     recvlock ALIGN8;
 
     pthread_cond_t  send_cond ALIGN8;
     pthread_mutex_t send_mutex ALIGN8;
@@ -253,14 +253,14 @@ struct mca_btl_nc_component_t {
 
     fifolist_t* inq;                        // input queues
     fifolist_t* myinq;                      // local input queue
-    int32_t*    sendqcnt;					// send queue counters
+    int32_t*    sendqcnt;                                       // send queue counters
 
-	uint64_t    ring_ofs;
+    uint64_t    ring_ofs;
 
     void**      shm_base;
     void*       shm_ringbase;
     void*       shm_fragbase;
- 
+
     ring_t*     ring;
     pring_t*    peer_ring;
     void**      peer_ring_buf;
